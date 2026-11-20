@@ -46,6 +46,7 @@ static inline struct thread *curthread(void) { return curthread_ptr; }
 void sched_init(void);
 struct thread *thread_create(const char *name, void (*fn)(void *), void *arg, int pid);
 void thread_start(struct thread *t);
+void thread_start_weighted(struct thread *t, uint32_t weight); /* EEVDF weight, nice 0 = 1024 */
 __noreturn void thread_exit(int status);
 struct thread *thread_by_tid(int tid);
 void schedule(void);

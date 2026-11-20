@@ -125,12 +125,14 @@ static void thread_free(struct thread *t)
 	t->state = TS_FREE;
 }
 
-void thread_start(struct thread *t)
+void thread_start(struct thread *t) { thread_start_weighted(t, 1024); }
+
+void thread_start_weighted(struct thread *t, uint32_t weight)
 {
 	uint64_t f = irq_save();
 	t->state = TS_RUNNABLE;
 	t->on_rq = true;
-	rs_sched_add(t->tid, 1024);
+	rs_sched_add(t->tid, weight);
 	if (curthread_ptr == idle_thread)
 		need_resched = true;
 	irq_restore(f);

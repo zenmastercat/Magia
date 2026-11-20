@@ -18,6 +18,7 @@ char kernel_cmdline[256];
 bool ktest_exit_mode;
 extern uint64_t boot_mbi_phys;
 void monitor_main(void);
+void kmain(uint32_t magic, uint32_t mbi_phys);
 
 bool cmdline_has(const char *word)
 {
@@ -35,10 +36,39 @@ bool cmdline_has(const char *word)
 	return false;
 }
 
+/*
+ * Deliberate crashes, used by tests/run-ktest.sh as negative tests of the
+ * hardening: each must end in a panic with a specific message.
+ */
+static __attribute__((noinline)) void crash_stack_protector(volatile int n)
+{
+	char buf[16];
+	for (volatile int i = 0; i < n; i++)
+		buf[i] = 'A'; /* overruns buf into the canary */
+	__asm__ volatile("" ::"r"(buf) : "memory");
+}
+
+static void crash_thread_canary(void)
+{
+	*(volatile uint64_t *)curthread()->stack = 0; /* as if the stack overflowed */
+	sched_yield();
+	thread_sleep_ms(10); /* the next switch checks the canary */
+}
+
+static void crash_tests(void)
+{
+	if (cmdline_has("crash=stackprot"))
+		crash_stack_protector(64);
+	if (cmdline_has("crash=canary"))
+		crash_thread_canary();
+	if (cmdline_has("crash=wx")) {
+		*(volatile uint8_t *)(uint64_t)kmain = 0xcc;
+	}
+}
+
 static void interrupts_on(void) { sti(); }
 SYSINIT(interrupts_on, 50001, interrupts_on); /* after sched_init (SI_ORDER_SCHED) */
 
-void kmain(uint32_t magic, uint32_t mbi_phys);
 void kmain(uint32_t magic, uint32_t mbi_phys)
 {
 	console_init();
@@ -64,10 +94,11 @@ void kmain(uint32_t magic, uint32_t mbi_phys)
 	kprintf("boot: %zu SYSINIT hooks, %zu ktests linked, %lu ms since timer start\n",
 		MAGIA_SET_COUNT(sysinit), MAGIA_SET_COUNT(ktest), ticks);
 
+	crash_tests();
 	if (ktest_exit_mode) {
 		int failed = ktest_run_all();
 		qemu_exit(failed ? 1 : 0x10);
-		panic("isa-debug-exit device missing (ktest finished, failed=%d)", failed);
+		machine_halt(); /* QEMU exits asynchronously */
 	}
 	monitor_main();
 	machine_halt();
