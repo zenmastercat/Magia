@@ -91,35 +91,33 @@ rm -f "$sock"
 		i=$((i + 1))
 		[ $i -gt 600 ] && break
 	done
-	for cmd in "uname" "sysctl kern.ostype" "ls /dev" "cat /etc/motd" "jails" "ps" "frobnicate"; do
-		printf '%s' "$cmd"
+	for cmd in "uname" "sysctl kern.ostype" "ls /dev" "cat /etc/motd" "jails" "ps" "lspci" "frobnicate"; do
+		printf '%s\r' "$cmd"
 		sleep 0.3
 	done
 	python3 -I "$HERE/hmp.py" "$sock" 'type:echo kbd-OK\n' >/dev/null
 	sleep 1
-	printf 'poweroff'
+	printf 'poweroff\r'
 	sleep 0.3
-} | MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
+} | QEMU_USB=xhci MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
 st=$?
 rm -f "$sock"
-clean=$(tr -d '' <"$log")
+clean=$(tr -d '\r' <"$log")
 mfail=0
-for want in "magia> uname" "Magia" "console" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye"; do
-	if ! printf '%s
-' "$clean" | grep -qF "$want"; then
+for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye"; do
+	if ! printf '%s\n' "$clean" | grep -qF "$want"; then
 		echo "   missing in monitor output: $want"
 		mfail=1
 	fi
 done
 # the echo command's own output line, not just the echoed keystrokes
-printf '%s
-' "$clean" | grep -qx 'kbd-OK' || { echo "   keyboard command did not run"; mfail=1; }
+printf '%s\n' "$clean" | grep -qx 'kbd-OK' || { echo "   keyboard command did not run"; mfail=1; }
 [ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; mfail=1; }
 if [ $mfail -ne 0 ]; then
 	echo "FAIL: monitor smoke test (see $log)"
 	fail=1
 else
-	echo "   monitor: 7 commands over serial, 1 over the PS/2 keyboard, poweroff exit status 33"
+	echo "   monitor: 8 commands over serial, 1 over the PS/2 keyboard, poweroff exit status 33"
 fi
 
 # ---------------------------------------------------------------- 3. crash (results)

@@ -11,6 +11,7 @@
 #include <magia/cpu.h>
 #include <magia/ktest.h>
 #include <magia/mm.h>
+#include <magia/pci.h>
 #include <magia/rust.h>
 #include <magia/syscall.h>
 #include <magia/thread.h>
@@ -83,6 +84,7 @@ static void cmd_poweroff(int argc, char **argv)
 }
 
 static void cmd_panic(int argc, char **argv) { panic("requested from the monitor"); }
+static void cmd_lspci(int argc, char **argv) { pci_dump(); }
 
 static const struct {
 	const char *name;
@@ -101,6 +103,7 @@ static const struct {
 	{ "cat", cmd_cat, "cat <path>: print a file" },
 	{ "sysctl", cmd_sysctl, "sysctl [name [value]]: read/list/set MIB nodes" },
 	{ "echo", cmd_echo, "echo words" },
+	{ "lspci", cmd_lspci, "PCI/PCIe functions (ECAM)" },
 	{ "bt", cmd_bt, "backtrace of the monitor thread" },
 	{ "panic", cmd_panic, "panic the kernel (test the panic path)" },
 	{ "reboot", cmd_reboot, "reset the machine" },

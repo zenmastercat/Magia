@@ -11,13 +11,21 @@
 # reads before looking for limine.conf on disk; one image serves every
 # test (the ESP is found by its FAT label, so BIOS boots work too).
 # Environment: QEMU, QEMU_ACCEL, QEMU_MEM, QEMU_SMP, QEMU_CPU, OVMF
-# (path to OVMF.fd, or "bios" for SeaBIOS).
+# (path to OVMF.fd, or "bios" for SeaBIOS), QEMU_USB (kbd: an xHCI
+# controller with a USB keyboard, the default; xhci: the controller only;
+# none).
 set -eu
 IMG=$1
 CMDLINE=$2
 shift 2
 : "${QEMU:=qemu-system-x86_64}" "${QEMU_ACCEL:=tcg}" "${QEMU_MEM:=8G}" "${QEMU_SMP:=4}"
-: "${QEMU_CPU:=max}" "${OVMF:=${OVMF_FD:-}}"
+: "${QEMU_CPU:=max}" "${OVMF:=${OVMF_FD:-}}" "${QEMU_USB:=kbd}"
+case "$QEMU_USB" in
+# an xHCI controller with a USB keyboard, as on the target PC (no PS/2 there)
+kbd) usb="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0" ;;
+xhci) usb="-device qemu-xhci,id=xhci" ;; # QEMU sendkey then reaches the PS/2 keyboard
+*) usb= ;;
+esac
 fw="-bios $OVMF"
 if [ "$OVMF" = bios ]; then
 	fw= # QEMU default: SeaBIOS, Limine BIOS stage
@@ -33,7 +41,7 @@ trap 'rm -f "$cfg"' EXIT INT TERM
 	printf '    cmdline: %s\n' "$CMDLINE"
 } >"$cfg"
 "$QEMU" -machine q35 -cpu "$QEMU_CPU" -accel "$QEMU_ACCEL" -m "$QEMU_MEM" -smp "$QEMU_SMP" \
-	$fw -no-reboot \
+	$fw $usb -no-reboot \
 	-drive "file=$IMG,format=raw,snapshot=on" \
 	-smbios "type=11,path=$cfg" \
 	-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
