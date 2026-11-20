@@ -91,9 +91,17 @@ and per-milestone tests: [plan-stage1.md](plan-stage1.md).
   QEMU and the target (BSP id 0), not for ids above 254 without VT-d
   interrupt remapping.
 - **Immutable image limits**: the PML4 and the direct map's own page
-  tables stay writable; a kernel write primitive could re-point PML4[511].
+  tables stay writable; a kernel write primitive could re-point PML4[511]
+  or edit the direct-map PTEs of the image's read-only alias (remapping
+  that alias through the VM calls is refused, a raw PTE write is not).
+  Fix with per-process PML4s built from a locked template and read-only
+  direct-map tables for the image (stage 3).
+- **Console logs** show physical addresses (LAPIC, HPET, memory map) but
+  no slid kernel addresses; the register dump on a kernel trap needs
+  `verbose`.
 - **RNG**: no entropy estimation or health tests (SP 800-90B) for the
-  TSC-jitter source; no `/dev/random` device yet.
+  TSC-jitter source (when it is the only source the boot log warns and
+  `sysctl kern.random.weak` is 1); no `/dev/random` device yet.
 - **No kernel stack guard pages.** Overflow is detected by the per-boot
   random canary at the bottom of each stack, not prevented.
 - **User code windows are written through the direct map** (a writable

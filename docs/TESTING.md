@@ -69,10 +69,11 @@ linker-set idea) and run in key order, each in a fresh process:
 |---|---|---|
 | 00x | `t_core.c` | boot, linker sets, Limine hand-off (base revision, KASLR slide, direct map, symbol lookup under the slide), #BP recovery, CPU protection bits, MSRs, timer/TSC, printf |
 | 020 | `t_core.c` | ACPI: the QEMU tables (4 CPUs with APIC ids 0-3, one I/O APIC at 0xfec00000, HPET, MCFG, FADT with 8042, PIT override to GSI 2); the parser may only read ACPI memory |
+| 021 | `t_core.c` | console output: kernel addresses printed at link-time values, firmware signature bytes outside 0x20..0x7e shown as `?` |
 | 03x | `t_console.c` | framebuffer: a probe line's glyph pixels read back and compared with the Spleen bitmaps; scancode translation (every byte value, every state) |
-| 04x | `t_rng.c` | ChaCha20 known answers (RFC 8439 A.1 #1 and 2.3.2, a two-block vector; cross-checked with `openssl enc -chacha20`), non-repeating output, bit balance, buffer bounds, reseed counter, random guard and canaries, `arc4random_uniform` range |
+| 04x | `t_rng.c` | ChaCha20 known answers (RFC 8439 A.1 #1 and 2.3.2, a two-block vector; cross-checked with `openssl enc -chacha20`), non-repeating output, bit balance, buffer bounds, reseed counter, random guard and canaries, `arc4random_uniform` range, `kern.random.weak` |
 | 05x | `t_intr.c` | interrupt controller mode (APIC or noapic, x2APIC and TSC deadline when the CPU has them), ticking at HZ, TSC vs HPET calibration, COM1 routed through the I/O APIC (redirection entry checked, then a real IRQ from a UART loopback byte) |
-| 1xx | `t_mm.c` | buddy alloc/free/merge, kmalloc stress, alignment, W^X, NX, SMEP, SMAP, NULL faults, page-table W+X scan, copyin/copyout negatives, fault fixup; 121: frames above 4 GiB allocated and touched; 122: bootloader memory reclaimed, all RAM managed; 130/131: the immutable kernel image (remaps refused with `-EPERM`, direct PTE/PDE/PDPTE writes fault) |
+| 1xx | `t_mm.c` | buddy alloc/free/merge, kmalloc stress, alignment, W^X, NX, SMEP, SMAP, NULL faults, page-table W+X scan, copyin/copyout negatives, fault fixup; 121: frames above 4 GiB allocated and touched; 122: bootloader memory reclaimed, all RAM managed; 130-132: the immutable kernel image (remaps of the kernel window and of the image's direct-map alias refused with `-EPERM`, direct PTE/PDE/PDPTE writes fault); 133: MMIO mappings refuse RAM |
 | 2xx | `t_sched.c` | threads, sleep timeouts, no lost wakeups, timer preemption, EEVDF weights, yield, thread reaping |
 | 3xx-8xx | `sys_*.c` | the system call layer: Capsicum, jails, VFS/pipes, kqueue, rings/futex, sysctl |
 | 9xx | `t_ring3.c` | ring-3 blobs making real `syscall`s; ring-3 faults kill only the process; UMIP; monitor commands |

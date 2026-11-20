@@ -68,8 +68,8 @@ void lapic_probe(void)
 		wrmsr(MSR_APIC_BASE, base);
 	}
 	lapic_x2 = (base & APIC_BASE_X2) != 0;
-	if (!lapic_x2)
-		lapic_mmio = vmm_map_mmio(base & APIC_BASE_ADDR, PAGE_SIZE);
+	if (!lapic_x2 && !(lapic_mmio = vmm_map_mmio(base & APIC_BASE_ADDR, PAGE_SIZE)))
+		panic("lapic: APIC base %p is RAM, refusing to map it", (void *)(base & APIC_BASE_ADDR));
 }
 
 /* Legacy mode: LINT0 = ExtINT (the 8259), LINT1 = NMI, APIC enabled. */
@@ -112,8 +112,8 @@ void lapic_init(void)
 		base |= APIC_BASE_X2; /* xAPIC -> x2APIC is a legal switch while enabled */
 	wrmsr(MSR_APIC_BASE, base);
 	lapic_x2 = (base & APIC_BASE_X2) != 0;
-	if (!lapic_x2 && !lapic_mmio)
-		lapic_mmio = vmm_map_mmio(base & APIC_BASE_ADDR, PAGE_SIZE);
+	if (!lapic_x2 && !lapic_mmio && !(lapic_mmio = vmm_map_mmio(base & APIC_BASE_ADDR, PAGE_SIZE)))
+		panic("lapic: APIC base %p is RAM, refusing to map it", (void *)(base & APIC_BASE_ADDR));
 
 	uint32_t id = lapic_read(LAPIC_ID);
 	lapic_bsp_id = lapic_x2 ? id : id >> APIC_ID_SHIFT;

@@ -413,3 +413,38 @@ KTEST(131, kernel_page_tables_are_read_only)
 	KT_ASSERT(vmm_translate(text, &pa, NULL));
 	KT_EQ(pa, virt_to_phys(__text_start));
 }
+
+/* The image's frames are also reachable through the direct map: that alias
+ * is read-only and, after the lock, cannot be remapped either. */
+KTEST(132, kernel_image_dmap_alias_is_immutable)
+{
+	extern char __text_start[], __kernel_end[];
+	uint64_t alias = (uint64_t)phys_to_virt(virt_to_phys(__text_start));
+	uint64_t kend = (uint64_t)__kernel_end; /* integer: no out-of-object pointer arithmetic */
+	uint64_t last = (uint64_t)phys_to_virt(virt_to_phys((void *)(kend - 1))) & ~(PAGE_SIZE - 1);
+	uint64_t pa0 = 0, fl0 = 0, pa1 = 0, fl1 = 0;
+	KT_ASSERT(vmm_translate(alias, &pa0, &fl0));
+	KT_EQ(fl0 & PTE_W, 0);
+	KT_EQ(vmm_protect(alias, PTE_W | PTE_NX | PTE_G), -EPERM);
+	KT_EQ(vmm_protect(last, PTE_W | PTE_NX | PTE_G), -EPERM);
+	KT_EQ(vmm_map(alias, pa0, PTE_W | PTE_NX | PTE_G), -EPERM);
+	KT_EQ(vmm_unmap(alias, NULL), -EPERM);
+	KT_ASSERT(vmm_translate(alias, &pa1, &fl1));
+	KT_EQ(pa1, pa0);
+	KT_EQ(fl1, fl0);
+	KT_EQ(try_access(do_write8, alias), PF);
+	/* RAM next to the image is not part of the lock */
+	uint64_t after = ALIGN_UP(virt_to_phys((void *)(kend - 1)) + 1, PAGE_SIZE);
+	KT_ASSERT(vmm_protect((uint64_t)phys_to_virt(after), PTE_W | PTE_NX | PTE_G) != -EPERM);
+}
+
+/* MMIO mappings of firmware-supplied addresses never land on RAM (F3). */
+KTEST(133, mmio_mapping_refuses_ram)
+{
+	KT_ASSERT(vmm_map_mmio(kernel_phys_base, PAGE_SIZE) == NULL);         /* the image */
+	uint64_t pa = pmm_alloc(0);
+	KT_ASSERT(vmm_map_mmio(pa, 64) == NULL);                              /* usable RAM */
+	KT_ASSERT(vmm_map_mmio(pa + PAGE_SIZE - 8, 16) == NULL);              /* straddling */
+	pmm_free(pa, 0);
+	KT_ASSERT(vmm_map_mmio(0xfec00000, 0x50) != NULL);                    /* the I/O APIC */
+}

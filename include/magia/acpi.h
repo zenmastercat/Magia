@@ -73,5 +73,6 @@ const uint8_t *magia_acpi_map(uint64_t pa, size_t len);
 /* Global system interrupt and INTI flags for ISA IRQ `irq` (identity
  * mapped, edge, active high unless an override says otherwise). */
 uint32_t acpi_isa_gsi(int irq, uint16_t *flags);
+void acpi_sig_printable(const char in[4], char out[5]); /* non-printable -> ? */
 
 #endif

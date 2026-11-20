@@ -101,9 +101,11 @@ pinned SHA-256.
 - `isr.S` stubs push a uniform `struct trapframe` and call
   `trap_dispatch()`; `swapgs` happens only when the trap came from ring 3,
   so `%gs` always points at `struct percpu` in the kernel.
-- Kernel exceptions panic with registers and a symbolized backtrace (the
-  second link pass embeds a sorted symbol table in `.ksyms`; it holds
-  link-time addresses and lookups subtract the KASLR slide), except: `#BP`
+- Kernel exceptions panic with a symbolized backtrace (the second link
+  pass embeds a sorted symbol table in `.ksyms`; it holds link-time
+  addresses and lookups subtract the KASLR slide). Kernel addresses are
+  printed at their link-time value and the register dump only appears
+  with `verbose`, so a console log does not reveal the slide. Exceptions: `#BP`
   returns (counted), a `#PF` inside `uaccess_copy` returns `-EFAULT`, and
   a fault while the thread armed `fault_jmp` resumes at `ksetjmp` (used by
   ktest to prove W^X/NX/SMEP/SMAP and the immutable page tables).
@@ -171,13 +173,25 @@ entropy (once), RDSEED, RDRAND, TSC jitter. API: `arc4random_buf`,
   data write-back; framebuffer write-combining through PAT entry 5, which
   Limine programs; reserved ranges and holes unmapped); refuses to create
   a W+X mapping. ktest 115 walks every live entry and asserts no leaf is
-  both writable and executable. `vmm_map_mmio()` maps device registers
-  uncached at `dmap_base + pa`.
+  both writable and executable; boot stops if the CPU has no NX.
+  `vmm_map_mmio()` maps device registers uncached at `dmap_base + pa` and
+  refuses any range that overlaps RAM in the memory map (usable, kernel,
+  bootloader-reclaimable), so a firmware table that names RAM as an I/O
+  APIC or HPET cannot turn register writes into kernel-memory writes; that
+  device is skipped.
 - **Immutable kernel image** (OpenBSD `mimmutable` idea): the last boot
-  step locks PML4 slot 511. `vmm_map`/`vmm_protect`/`vmm_unmap` return
-  `-EPERM` there, and every page-table page below it becomes read-only in
-  the direct map (2 MiB direct-map pages are split as needed), so even a
-  direct PTE write faults.
+  step locks the kernel. Exactly what is locked:
+  - the kernel window (PML4 slot 511: text, rodata, data, bss mappings):
+    `vmm_map`/`vmm_protect`/`vmm_unmap` return `-EPERM` there, and every
+    page-table page below PML4[511] (PDPT, PDs, PTs) becomes read-only in
+    the direct map (2 MiB direct-map pages are split as needed), so a
+    direct write to one of those PTEs faults;
+  - the image's alias in the direct map (`dmap_base` + the image's
+    physical frames, mapped read-only since boot): the same three calls
+    return `-EPERM` for it.
+  Not locked: the PML4 itself and the direct map's own page tables,
+  including the PTEs of that read-only alias, stay writable, so a kernel
+  write primitive could still edit them directly (see ROADMAP.md).
 - **kmem.c** - power-of-two zones of 16..2048 bytes, one page per slab,
   free list and in-use count kept in `struct page`; bigger requests take
   whole buddy blocks. Double frees are detected and panic.

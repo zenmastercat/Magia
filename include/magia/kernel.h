@@ -72,6 +72,7 @@ void console_rx_push(uint8_t c); /* input byte from an IRQ handler */
 __noreturn void panic(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void backtrace_from(uint64_t rbp, uint64_t rip);
 const char *ksym_lookup(uint64_t addr, uint64_t *offset);
+uint64_t kaddr_unslid(uint64_t addr); /* image address -> link-time address */
 extern volatile int panicking;
 
 #define KASSERT(cond, ...)                                                   \

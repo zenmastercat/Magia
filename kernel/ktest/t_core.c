@@ -173,3 +173,23 @@ KTEST(020, acpi_tables_match_qemu)
 	KT_ASSERT(magia_acpi_map(0xfec00000, 36) == NULL);
 	KT_ASSERT(magia_acpi_map(~0ULL - 8, 36) == NULL);
 }
+
+/* Console output does not reveal the KASLR slide or pass raw firmware
+ * bytes through (security review stage 1, F2). */
+KTEST(021, console_hides_slide_and_firmware_bytes)
+{
+	uint64_t off = 1;
+	const char *name = ksym_lookup((uint64_t)ktest_run_all, &off);
+	KT_ASSERT(name != NULL);
+	uint64_t link = kaddr_unslid((uint64_t)ktest_run_all);
+	KT_EQ(link, (uint64_t)ktest_run_all - bootinfo.kernel_slide);
+	KT_ASSERT(link >= KERNEL_VMA && link < KERNEL_VMA + (64ULL << 20)); /* where nm puts it */
+	KT_EQ(kaddr_unslid(0x1234), 0x1234); /* non-image values unchanged */
+	char out[5];
+	acpi_sig_printable("AP\x1b" "C", out);
+	KT_EQ(strcmp(out, "AP?C"), 0);
+	acpi_sig_printable("\x7f\x80 ~", out);
+	KT_EQ(strcmp(out, "?? ~"), 0);
+	acpi_sig_printable("FACP", out);
+	KT_EQ(strcmp(out, "FACP"), 0);
+}

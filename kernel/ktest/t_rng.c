@@ -10,6 +10,7 @@
 #include <magia/ktest.h>
 #include <magia/rng.h>
 #include <magia/thread.h>
+#include <magia/x86.h>
 
 KTEST(040, chacha20_known_answers)
 {
@@ -195,4 +196,19 @@ KTEST(043, stack_guard_and_canaries_are_random)
 	KT_ASSERT(lo && hi);
 	KT_EQ(arc4random_uniform(0), 0);
 	KT_EQ(arc4random_uniform(1), 0);
+}
+
+/* kern.random.weak tells whether only TSC jitter ever seeded the RNG. */
+KTEST(044, rng_weak_flag_matches_sources)
+{
+	uint32_t a, b, c, d;
+	cpuid(1, 0, &a, &b, &c, &d);
+	bool rdrand = (c >> 30) & 1;
+	KT_ASSERT(rng_weak == 0 || rng_weak == 1);
+	if (rdrand) /* QEMU -cpu max and the host CPU both have RDRAND */
+		KT_EQ(rng_weak, 0);
+	rng_reseed();
+	KT_ASSERT(rng_sources & RNG_SRC_TSC);
+	if (rng_sources & (RNG_SRC_RDSEED | RNG_SRC_RDRAND))
+		KT_EQ(rng_weak, 0);
 }

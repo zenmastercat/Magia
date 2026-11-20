@@ -50,6 +50,11 @@ unsigned rng_sources;
 uint64_t stack_canary = 0x4d61676961537421ULL; /* replaced at boot */
 SYSCTL_U64_RO(kern_rng_reseeds, "kern.random.reseeds", (const uint64_t *)&rng_reseeds,
 	      "kernel RNG reseeds since boot");
+/* 1 until a source better than TSC jitter (Limine/EFI entropy, RDSEED,
+ * RDRAND) has fed the generator; sticky once it has. */
+uint64_t rng_weak = 1;
+SYSCTL_U64_RO(kern_rng_weak, "kern.random.weak", &rng_weak,
+	      "1: the RNG was only ever seeded from TSC jitter");
 
 /* memset that the compiler may not drop */
 static void wipe(void *p, size_t n)
@@ -170,6 +175,8 @@ static void rs_stir(void)
 	memset(rs_buf, 0, RSBUFSZ);
 	rs_count = RNG_RESEED_BYTES;
 	rng_sources = src;
+	if (src & (RNG_SRC_LIMINE | RNG_SRC_RDSEED | RNG_SRC_RDRAND))
+		rng_weak = 0;
 	rng_reseeds++;
 }
 
@@ -276,5 +283,8 @@ static void rng_report(void)
 	kprintf("rng: ChaCha20 (fast key erasure), %lu reseed(s), sources:%s%s%s%s\n", (uint64_t)rng_reseeds,
 		rng_sources & RNG_SRC_LIMINE ? " Limine" : "", rng_sources & RNG_SRC_RDSEED ? " RDSEED" : "",
 		rng_sources & RNG_SRC_RDRAND ? " RDRAND" : "", rng_sources & RNG_SRC_TSC ? " TSC-jitter" : "");
+	if (rng_weak)
+		kprintf("rng: WARNING: seeded from TSC jitter only (no RDSEED, RDRAND or firmware entropy);"
+			" stack guard and canaries are weak (sysctl kern.random.weak=1)\n");
 }
 SYSINIT(rng_report, 10001, rng_report);

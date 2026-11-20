@@ -32,15 +32,17 @@ runs on a real desktop PC.
   RDSEED/RDRAND, TSC jitter and Limine's entropy); the stack-protector
   guard and thread-stack canaries come from it.
 - Hardening: W^X page tables, NX, CR0.WP, SMEP, SMAP, UMIP, an
-  **immutable kernel image** after boot (remaps refused, kernel page-table
-  pages read-only - OpenBSD's `mimmutable` idea), stack protector,
-  zero-initialised stack variables.
+  **immutable kernel image** after boot (OpenBSD's `mimmutable` idea:
+  remapping the kernel window or the image's direct-map alias is refused,
+  and the page tables under the kernel window are read-only; the direct
+  map's own tables are not, see the roadmap), stack protector,
+  zero-initialised stack variables; boot stops without NX.
 - From 0.1: buddy page allocator, slab-style `kmalloc`, preemptive kernel
   threads with an **EEVDF** policy (Rust), `syscall`/`sysret`, and in Rust:
   syscall table with typed validation, **Capsicum**, **jails** with
   hierarchical accounting, VFS (ramfs, devfs, pipes), **kqueue**, an
   io_uring-style ring, **futex**, **sysctl**.
-- 91 in-kernel tests (`ktest`) and 153 host `cargo test`s; `make test`
+- 95 in-kernel tests (`ktest`) and 153 host `cargo test`s; `make test`
   boots the image nine times (OVMF/UEFI, 32 GiB, SeaBIOS, `noapic`, KVM,
   the monitor, three deliberate crashes).
 

@@ -24,6 +24,7 @@ extern volatile uint64_t rng_reseeds; /* reseeds done since boot (>= 1 after boo
 extern uint64_t stack_canary;         /* random per boot: bottom-of-stack marker of every kernel thread */
 extern uint64_t __stack_chk_guard;
 extern unsigned rng_sources;          /* RNG_SRC_* bits seen at the last reseed */
+extern uint64_t rng_weak;             /* 1 while only TSC jitter has seeded the RNG */
 #define RNG_SRC_RDSEED 1
 #define RNG_SRC_RDRAND 2
 #define RNG_SRC_TSC    4

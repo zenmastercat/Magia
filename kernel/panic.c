@@ -44,14 +44,24 @@ const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 	return ksym_strtab + ksym_table[lo].name_off;
 }
 
+/* Kernel text addresses are printed at their link-time value (as in
+ * `nm build/magia.elf`), so a console log does not reveal the KASLR slide. */
+uint64_t kaddr_unslid(uint64_t a)
+{
+	extern char __kernel_start[], __kernel_end[];
+	if (a >= (uint64_t)__kernel_start && a < (uint64_t)__kernel_end)
+		return a - (kernel_virt_base - KERNEL_VMA);
+	return a;
+}
+
 static void print_frame(uint64_t rip)
 {
 	uint64_t off = 0;
 	const char *name = ksym_lookup(rip, &off);
 	if (name)
-		kprintf("  [<%p>] %s+0x%lx\n", (void *)rip, name, off);
+		kprintf("  [<%p>] %s+0x%lx\n", (void *)kaddr_unslid(rip), name, off);
 	else
-		kprintf("  [<%p>] ?\n", (void *)rip);
+		kprintf("  [<%p>] ?\n", (void *)kaddr_unslid(rip));
 }
 
 void backtrace_from(uint64_t rbp, uint64_t rip)

@@ -53,6 +53,15 @@ uint32_t acpi_isa_gsi(int irq, uint16_t *flags)
 	return (uint32_t)irq;
 }
 
+/* Firmware bytes: printable ASCII only, so a table cannot send terminal
+ * escape sequences to the console. */
+void acpi_sig_printable(const char in[4], char out[5])
+{
+	for (int i = 0; i < 4; i++)
+		out[i] = in[i] >= 0x20 && in[i] <= 0x7e ? in[i] : '?';
+	out[4] = 0;
+}
+
 static void acpi_sysinit(void)
 {
 	if (!bootinfo.rsdp_pa) {
@@ -65,8 +74,11 @@ static void acpi_sysinit(void)
 		return;
 	}
 	kprintf("acpi: rev %u, %u tables:", acpi.rsdp_revision, acpi.ntables);
-	for (uint32_t i = 0; i < acpi.ntables; i++)
-		kprintf(" %.4s", acpi.table_sig[i]);
+	for (uint32_t i = 0; i < acpi.ntables && i < ACPI_MAX_TABLES; i++) {
+		char sig[5];
+		acpi_sig_printable(acpi.table_sig[i], sig);
+		kprintf(" %s", sig);
+	}
 	kprintf("\nacpi: %u CPUs (%u disabled), %u I/O APIC, %u overrides, LAPIC %p", acpi.ncpus,
 		acpi.cpus_disabled, acpi.nioapics, acpi.nisos, (void *)acpi.lapic_addr);
 	if (acpi.found & ACPI_FOUND_HPET)

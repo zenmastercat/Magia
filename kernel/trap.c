@@ -92,12 +92,16 @@ void trap_dump(const struct trapframe *tf)
 {
 	const char *name = tf->vector < 32 ? exc_names[tf->vector] : "irq";
 	kprintf("trap %lu (%s) err=0x%lx\n", tf->vector, name, tf->error);
-	kprintf(" rip=%p cs=%lx rflags=%lx rsp=%p ss=%lx\n", (void *)tf->rip, tf->cs, tf->rflags,
-		(void *)tf->rsp, tf->ss);
-	kprintf(" rax=%016lx rbx=%016lx rcx=%016lx rdx=%016lx\n", tf->rax, tf->rbx, tf->rcx, tf->rdx);
-	kprintf(" rsi=%016lx rdi=%016lx rbp=%016lx r8 =%016lx\n", tf->rsi, tf->rdi, tf->rbp, tf->r8);
-	kprintf(" r9 =%016lx r10=%016lx r11=%016lx r12=%016lx\n", tf->r9, tf->r10, tf->r11, tf->r12);
-	kprintf(" r13=%016lx r14=%016lx r15=%016lx cr2=%016lx\n", tf->r13, tf->r14, tf->r15, read_cr2());
+	kprintf(" rip=%p (link-time) cs=%lx rflags=%lx\n", (void *)kaddr_unslid(tf->rip), tf->cs, tf->rflags);
+	if (cmdline_has("verbose")) { /* raw pointers would reveal the KASLR slide */
+		kprintf(" rsp=%p ss=%lx\n", (void *)tf->rsp, tf->ss);
+		kprintf(" rax=%016lx rbx=%016lx rcx=%016lx rdx=%016lx\n", tf->rax, tf->rbx, tf->rcx, tf->rdx);
+		kprintf(" rsi=%016lx rdi=%016lx rbp=%016lx r8 =%016lx\n", tf->rsi, tf->rdi, tf->rbp, tf->r8);
+		kprintf(" r9 =%016lx r10=%016lx r11=%016lx r12=%016lx\n", tf->r9, tf->r10, tf->r11, tf->r12);
+		kprintf(" r13=%016lx r14=%016lx r15=%016lx cr2=%016lx\n", tf->r13, tf->r14, tf->r15, read_cr2());
+	} else {
+		kprintf(" (registers hidden; boot with \"verbose\" to print them)\n");
+	}
 	if (tf->vector == 14)
 		kprintf(" #PF: %s %s %s%s\n", tf->error & 1 ? "protection" : "not-present",
 			tf->error & 2 ? "write" : "read", tf->error & 4 ? "user" : "kernel",

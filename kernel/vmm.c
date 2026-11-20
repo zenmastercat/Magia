@@ -14,7 +14,8 @@
  *     code. The framebuffer is mapped write-combining, MMIO uncached on
  *     demand (vmm_map_mmio); reserved ranges and holes are not mapped.
  *   nothing at virtual address 0 (NULL dereferences fault).
- * No mapping is ever both writable and executable (checked by ktest 1xx).
+ * No mapping is ever both writable and executable (checked by ktest 115);
+ * boot stops if the CPU has no NX, since W^X depends on it.
  * User windows (uvm.c) live below USER_TOP with the U bit.
  */
 #include <magia/abi.h>
@@ -81,9 +82,18 @@ static uint64_t *walk(uint64_t *pml4, uint64_t va, int stop, bool create)
  * built from a locked template (stage 3) and CR0.WP-protected PML4 pages.
  */
 static bool kernel_locked;
-static uint64_t immutable_start; /* first VA of PML4 slot 511 */
+static uint64_t immutable_start;    /* first VA of PML4 slot 511 */
+static uint64_t img_pa_lo, img_pa_hi; /* the image's frames, set by vmm_init() */
 
-static bool immutable(uint64_t va) { return kernel_locked && va >= immutable_start; }
+/* The kernel window, and the image's read-only alias in the direct map. */
+static bool immutable(uint64_t va)
+{
+	if (!kernel_locked)
+		return false;
+	if (va >= immutable_start)
+		return true;
+	return va >= dmap_base && va - dmap_base >= img_pa_lo && va - dmap_base < img_pa_hi;
+}
 
 int vmm_map(uint64_t va, uint64_t pa, uint64_t flags)
 {
@@ -227,6 +237,8 @@ uint64_t vmm_dmap_bytes;
 void vmm_init(void)
 {
 	nx_enabled = (rdmsr(MSR_EFER) & EFER_NXE) != 0;
+	if (!nx_enabled) /* W^X below relies on NX; every x86-64 CPU since ~2004 has it */
+		panic("Magia needs NX (EFER.NXE): this CPU or VM model does not provide it");
 	kernel_pml4 = pt_alloc();
 	/* Pre-create the upper half PDPTs so the kernel half is identical in
 	 * any future per-process PML4 (just copy entries 256..511). */
@@ -241,6 +253,8 @@ void vmm_init(void)
 	/* direct map: merge the (sorted, possibly overlapping) WB entries */
 	uint64_t kps = virt_to_phys(__kernel_start);
 	uint64_t kpe = ALIGN_UP(kps + ((uint64_t)__kernel_end - (uint64_t)__kernel_start), PAGE_SIZE);
+	img_pa_lo = kps;
+	img_pa_hi = kpe;
 	uint64_t cs = 0, ce = 0;
 	for (size_t i = 0; i <= bootinfo.nmmap; i++) {
 		const struct boot_mmap_entry *m = i < bootinfo.nmmap ? &bootinfo.mmap[i] : NULL;
@@ -269,9 +283,24 @@ void vmm_init(void)
 		nx_enabled ? "on" : "off", vmm_dmap_bytes >> 20, vmm_pt_pages);
 }
 
+/* Device registers named by firmware (ACPI, MSRs) must not be RAM: a bad
+ * table would otherwise turn MMIO writes into writes to kernel memory. */
+static bool overlaps_ram(uint64_t s, uint64_t e)
+{
+	for (size_t i = 0; i < bootinfo.nmmap; i++) {
+		const struct boot_mmap_entry *m = &bootinfo.mmap[i];
+		bool ram = m->type == MEM_USABLE || m->type == MEM_KERNEL || m->type == MEM_BOOT_RECLAIM;
+		if (ram && s < m->base + m->length && m->base < e)
+			return true;
+	}
+	return false;
+}
+
 void *vmm_map_mmio(uint64_t pa, uint64_t len)
 {
 	uint64_t s = ALIGN_DOWN(pa, PAGE_SIZE), e = ALIGN_UP(pa + len, PAGE_SIZE);
+	if (len == 0 || e <= s || overlaps_ram(s, e))
+		return NULL;
 	for (uint64_t p = s; p < e; p += PAGE_SIZE) {
 		uint64_t f;
 		if (vmm_translate(dmap_base + p, NULL, &f))
