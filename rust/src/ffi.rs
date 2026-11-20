@@ -198,3 +198,33 @@ pub extern "C" fn rs_dbg_cat(path: *const u8, len: usize) {
 pub extern "C" fn rs_dbg_uname() {
     with_kernel(|k| k.dbg_uname())
 }
+
+// ---- ACPI (rust/src/acpi.rs; C side kernel/acpi.c) ----
+
+unsafe extern "C" {
+    fn magia_acpi_map(pa: u64, len: usize) -> *const u8;
+}
+
+struct KernelPhys;
+impl crate::acpi::PhysMem for KernelPhys {
+    fn read(&self, pa: u64, len: usize) -> Option<&[u8]> {
+        // SAFETY: magia_acpi_map returns NULL or a direct-map pointer to
+        // `len` bytes of mapped, read-only-in-practice firmware memory.
+        let p = unsafe { magia_acpi_map(pa, len) };
+        if p.is_null() { None } else { Some(unsafe { core::slice::from_raw_parts(p, len) }) }
+    }
+}
+
+/// Parse the ACPI tables from the RSDP; 0 or -code (size mismatch: -99).
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_acpi_parse(rsdp_pa: u64, bios: i32, out: *mut crate::acpi::CAcpiInfo, size: usize) -> i32 {
+    if out.is_null() || size != core::mem::size_of::<crate::acpi::CAcpiInfo>() {
+        return -99;
+    }
+    // SAFETY: C passes a pointer to its `struct acpi_info` of `size` bytes.
+    let out = unsafe { &mut *out };
+    match crate::acpi::parse_all(&KernelPhys, rsdp_pa, bios != 0, out) {
+        Ok(()) => 0,
+        Err(e) => -e.code(),
+    }
+}

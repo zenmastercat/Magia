@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /* t_core.c - ktests for boot, CPU setup, traps and linker sets (0xx). */
+#include <magia/acpi.h>
 #include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/ktest.h>
@@ -142,4 +143,33 @@ KTEST(004, boot_limine_kaslr_and_direct_map)
 	/* the boot copy of Limine's data is complete */
 	KT_ASSERT(bootinfo.nmmap > 0 && bootinfo.rsdp_pa != 0);
 	KT_ASSERT(strcmp(kernel_cmdline, bootinfo.cmdline) == 0);
+}
+
+/* The Rust parser read QEMU's q35 tables (-smp 4): checked against what
+ * QEMU builds, so a parser regression shows up here and in cargo test. */
+KTEST(020, acpi_tables_match_qemu)
+{
+	KT_EQ(acpi_status, 0);
+	KT_EQ(acpi.found & (ACPI_FOUND_MADT | ACPI_FOUND_HPET | ACPI_FOUND_MCFG | ACPI_FOUND_FADT),
+	      ACPI_FOUND_MADT | ACPI_FOUND_HPET | ACPI_FOUND_MCFG | ACPI_FOUND_FADT);
+	KT_EQ(acpi.ncpus, 4);
+	for (uint32_t i = 0; i < acpi.ncpus && i < 4; i++)
+		KT_EQ(acpi.cpu_apic_id[i], i);
+	KT_EQ(acpi.nioapics, 1);
+	KT_EQ(acpi.ioapic_addr[0], 0xfec00000);
+	KT_EQ(acpi.ioapic_gsi_base[0], 0);
+	KT_EQ(acpi.lapic_addr, 0xfee00000);
+	KT_EQ(acpi.hpet_addr, 0xfed00000);
+	KT_EQ(acpi.nmcfg, 1);
+	KT_EQ(acpi.mcfg_base[0] & ((1 << 20) - 1), 0);
+	KT_EQ(acpi.madt_bad_entries, 0);
+	uint16_t fl;
+	KT_EQ(acpi_isa_gsi(0, &fl), 2); /* the PIT is wired to GSI 2 */
+	KT_EQ(acpi_isa_gsi(4, &fl), 4); /* COM1 identity mapped */
+	KT_EQ(acpi.has_8042, 1);
+	/* the parser may only read ACPI memory: RAM and MMIO are refused */
+	KT_ASSERT(magia_acpi_map(bootinfo.rsdp_pa, 20) != NULL);
+	KT_ASSERT(magia_acpi_map(kernel_phys_base, 36) == NULL);
+	KT_ASSERT(magia_acpi_map(0xfec00000, 36) == NULL);
+	KT_ASSERT(magia_acpi_map(~0ULL - 8, 36) == NULL);
 }
