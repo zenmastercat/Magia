@@ -133,14 +133,37 @@ All processes share one page table (per-process tables are on the roadmap).
   capability mode, runs the handler, and loops over sleeps for blocking
   calls. See SYSCALLS.md for every call.
 
-## Rust subsystems
+## Rust subsystems (`rust/src/`)
 
-See `rust/src/` and SYSCALLS.md. State lives in plain structs owned by one
-global behind an IRQ-disabling Giant lock (the scheduler and the jail
-memory accounting have their own locks because C calls them from the timer
-IRQ and from inside `uvm_alloc`). Kernel services are reached through a
-small `kenv` layer that is mocked in host tests, so every policy module runs
-under `cargo test` on Linux.
+| Module | Role |
+|---|---|
+| `ffi.rs` | the C -> Rust boundary: every `rs_*` export, the global instances behind their locks |
+| `kenv.rs` | the only path from Rust to C services (`magia_*`); a thread-local mock under `cargo test` |
+| `klock.rs` | `KLock`: IRQ-disabling spinlock (Giant for kernel state; separate SCHED and ACCT locks) |
+| `abi.rs` | `#[repr(C)]` mirror of `include/magia/abi.h`, size-checked against C at boot |
+| `uaccess.rs` | typed `copyin`/`copyout` of user structures and strings (copied once, then validated) |
+| `syscall.rs` | the syscall table: typed argument descriptors, capability-mode flag, generic validation, dispatch, blocking loop |
+| `kernel.rs` | the kernel state struct: processes, jails, open files, VFS, pipes, kqueues, rings |
+| `proc.rs` | process table: spawn, exit, waitpid, nice/weights, listing, visibility |
+| `cap.rs` | Capsicum rights and capability-mode rules |
+| `jail.rs`, `acct.rs` | jails (root, hostname, visibility, nesting) and the single hierarchical accounting tree |
+| `vfs.rs`, `fs.rs`, `pipe.rs` | in-memory namespace with ramfs + devfs, file system calls, pipes |
+| `kqueue.rs` | kqueue/kevent filters READ, WRITE, PROC, TIMER, USER |
+| `uring.rs` | narrowed io_uring-style rings (NOP, READ, WRITE, TIMEOUT; kill switch; per-jail permission) |
+| `futex.rs` | futex wait/wake keyed by user address |
+| `sysctl.rs` | the MIB tree, including C nodes from the linker set |
+| `sched.rs` | EEVDF policy |
+| `dbg.rs` | text output for the monitor (`ps`, `jails`, `ls`, `cat`, `sysctl`, `uname`) |
+
+State lives in plain structs owned by one global behind an IRQ-disabling
+Giant lock; the scheduler and the jail memory accounting have their own
+locks because C calls them from the timer IRQ and from inside
+`uvm_alloc`. `unsafe` is confined to `ffi.rs`, `kenv.rs`, `klock.rs`,
+`abi.rs`, `lib.rs` (allocator, panic handler), `sysctl.rs` (reading C
+sysctl pointers) and `uring.rs` (volatile access to the shared ring).
+Blocking calls register the caller on a wait list, call
+`magia_sleep_prepare` while still holding Giant, drop Giant, then
+`magia_sleep_commit`, and retry.
 
 ## Debug monitor
 
