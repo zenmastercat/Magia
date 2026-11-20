@@ -45,14 +45,14 @@ KTEST(050, interrupt_controller_mode)
 
 KTEST(051, timer_ticks_at_hz)
 {
-	uint64_t t0 = ticks, v0 = vec_counts[0];
+	uint64_t t0 = ticks, v0 = vec_counts[VEC_LAPIC_TIMER];
 	delay_ms(50); /* TSC busy-wait: the tick must keep coming meanwhile */
 	uint64_t dt = ticks - t0;
 	KT_ASSERT(dt >= 25 && dt <= 100);
 	if (apic_mode)
-		KT_ASSERT(vec_counts[0] - v0 >= dt); /* through the LAPIC vector */
+		KT_ASSERT(vec_counts[VEC_LAPIC_TIMER] - v0 >= dt); /* through the LAPIC vector */
 	else
-		KT_EQ(vec_counts[0], v0);
+		KT_EQ(vec_counts[VEC_LAPIC_TIMER], v0);
 }
 
 KTEST(052, timer_calibration_sanity)

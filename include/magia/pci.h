@@ -46,6 +46,8 @@ struct pci_dev {
 	uint16_t vendor, device;
 	struct pci_bar bar[6];
 	volatile uint8_t *cfg; /* this function's 4 KiB ECAM window */
+	int msi_vec;           /* 0, or the IDT vector of its MSI/MSI-X message */
+	bool msix;
 };
 
 extern struct pci_dev pci_devs[PCI_MAX_DEVS];

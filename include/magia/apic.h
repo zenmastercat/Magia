@@ -20,6 +20,8 @@
 
 /* IDT vectors: ISA IRQ n is 32 + n in both modes (IRQ_BASE). */
 #define VEC_LAPIC_TIMER 48
+#define VEC_MSI_FIRST   56 /* MSI/MSI-X vectors handed out by pci.c */
+#define VEC_MSI_LAST    63
 #define VEC_LAPIC_ERROR 254
 #define VEC_SPURIOUS    255
 

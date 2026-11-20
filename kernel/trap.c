@@ -31,7 +31,7 @@ struct __packed idt_gate {
 static struct idt_gate idt[256] __aligned(16);
 static irq_handler_t irq_handlers[16];
 volatile uint64_t irq_counts[16];
-volatile uint64_t vec_counts[2]; /* LAPIC timer, LAPIC error */
+volatile uint64_t vec_counts[256]; /* per LAPIC-delivered vector (timer, error, MSI) */
 volatile uint64_t breakpoint_hits;
 volatile uint64_t user_faults;
 extern const uint64_t isr_table[];
@@ -64,9 +64,10 @@ void idt_init(void)
 {
 	for (int i = 0; i < 48; i++)
 		set_gate(i, isr_table[i], i == 8 ? 1 : i == 2 ? 2 : 0);
-	set_gate(VEC_LAPIC_TIMER, isr_table[48], 0);
-	set_gate(VEC_LAPIC_ERROR, isr_table[49], 0);
-	set_gate(VEC_SPURIOUS, isr_table[50], 0);
+	for (int i = 48; i < 64; i++) /* LAPIC timer (48) and MSI vectors (56-63) */
+		set_gate(i, isr_table[i], 0);
+	set_gate(VEC_LAPIC_ERROR, isr_table[64], 0);
+	set_gate(VEC_SPURIOUS, isr_table[65], 0);
 	struct __packed {
 		uint16_t limit;
 		uint64_t base;
@@ -139,8 +140,8 @@ void trap_dispatch(struct trapframe *tf)
 		preempt_check();
 		return;
 	}
-	if (v == VEC_LAPIC_TIMER || v == VEC_LAPIC_ERROR) {
-		vec_counts[v == VEC_LAPIC_TIMER ? 0 : 1]++;
+	if ((v >= VEC_LAPIC_TIMER && v <= VEC_MSI_LAST) || v == VEC_LAPIC_ERROR) {
+		vec_counts[v]++;
 		if (vec_handlers[v])
 			vec_handlers[v](tf);
 		lapic_eoi();

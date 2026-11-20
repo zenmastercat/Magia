@@ -24,7 +24,7 @@ typedef void (*irq_handler_t)(struct trapframe *tf);
 void irq_register(int irq, irq_handler_t h);
 void irq_enable(int irq); /* unmask ISA IRQ `irq` (8259 or I/O APIC) */
 void irq_register_vector(int vec, irq_handler_t h); /* LAPIC timer/error vectors */
-extern volatile uint64_t vec_counts[2]; /* LAPIC timer, LAPIC error interrupts */
+extern volatile uint64_t vec_counts[256]; /* interrupts per LAPIC-delivered vector */
 void trap_dispatch(struct trapframe *tf);
 void trap_dump(const struct trapframe *tf);
 
