@@ -1,49 +1,41 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /*
- * Magia kernel linker script.
- *  - .boot* sections run at their physical address (1 MiB), before paging;
- *    code (R+X) and data (R+W) get separate program headers, so no
- *    segment in the ELF is RWX.
- *  - everything else is linked at KERNEL_VMA + physical (higher half).
- *  - each output section starts on a page boundary so vmm.c can apply
- *    W^X permissions per section (text RX, rodata R, data/bss RW+NX).
- *  - linker sets (set_*) are gathered and sorted inside .rodata.
+ * Magia kernel linker script (Limine boot protocol, static PIE).
+ *  - linked at KERNEL_LINK_BASE (-2 GiB) as a position-independent
+ *    executable; Limine applies the R_X86_64_RELATIVE relocations and,
+ *    with "kaslr: yes", slides the whole image by a random 4 KiB multiple
+ *    (kernel/boot.c records the slide).
+ *  - one PT_LOAD per permission: text R+X, rodata R, data R+W, so no
+ *    segment is RWX; vmm.c re-applies the same W^X permissions per section.
+ *  - each output section starts on a page boundary.
+ *  - linker sets (set_*) are gathered and sorted inside .rodata; the
+ *    backtrace symbol table (.ksyms) and the dynamic relocation tables come
+ *    after everything else in the read-only segment, so the second link
+ *    pass (which adds .ksyms and its relocations) never moves code.
  */
 OUTPUT_FORMAT("elf64-x86-64")
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-KERNEL_VMA = 0xffffffff80000000;
+KERNEL_LINK_BASE = 0xffffffff80000000;
 
 PHDRS
 {
-	boottext PT_LOAD FLAGS(5); /* R+X: multiboot header, 32-bit entry  */
-	bootdata PT_LOAD FLAGS(6); /* R+W: boot page tables, boot stack    */
-	text   PT_LOAD FLAGS(5);
-	rodata PT_LOAD FLAGS(4);
-	data   PT_LOAD FLAGS(6);
+	text    PT_LOAD FLAGS(5);
+	rodata  PT_LOAD FLAGS(4);
+	data    PT_LOAD FLAGS(6);
+	dynamic PT_DYNAMIC FLAGS(4);
 }
 
 SECTIONS
 {
-	. = 0x100000;
-	__kernel_phys_start = .;
-	.boot : {
-		KEEP(*(.multiboot))
-		*(.boot.text)
-	} :boottext
+	. = KERNEL_LINK_BASE;
+	__kernel_start = .;
 
-	. = ALIGN(4096);
-	.bootdata : {
-		*(.boot.data)
-	} :bootdata
-
-	. = ALIGN(4096);
-	. += KERNEL_VMA;
-
-	.text : AT(ADDR(.text) - KERNEL_VMA) {
+	.text : {
 		__text_start = .;
+		*(.text.entry)
 		*(.text .text.*)
 		. = ALIGN(16);
 		__user_blob_section = .;
@@ -52,11 +44,9 @@ SECTIONS
 		__text_end = .;
 	} :text
 
-	.rodata : AT(ADDR(.rodata) - KERNEL_VMA) {
+	.rodata : ALIGN(4096) {
 		__rodata_start = .;
 		*(.rodata .rodata.*)
-		*(.data.rel.ro .data.rel.ro.*)
-		*(.got .got.plt)
 		. = ALIGN(8);
 		__start_set_sysinit = .;
 		KEEP(*(SORT(set_sysinit.*)))
@@ -67,19 +57,32 @@ SECTIONS
 		__start_set_sysctl = .;
 		KEEP(*(SORT(set_sysctl.*)))
 		__stop_set_sysctl = .;
-		/* the symbol table for backtraces comes last so that adding it
-		 * in the second link pass does not move any code */
-		KEEP(*(.ksyms))
-		. = ALIGN(4096);
-		__rodata_end = .;
 	} :rodata
+	/* written by Limine's relocation pass before entry, read-only after */
+	.data.rel.ro : { *(.data.rel.ro .data.rel.ro.*) } :rodata
+	.got : { *(.got) *(.igot) } :rodata
+	.got.plt : { *(.got.plt) *(.igot.plt) } :rodata
+	.ksyms : { KEEP(*(.ksyms)) } :rodata
+	.dynamic : { *(.dynamic) } :rodata :dynamic
+	.dynsym : { *(.dynsym) } :rodata
+	.dynstr : { *(.dynstr) } :rodata
+	.hash : { *(.hash) } :rodata
+	.gnu.hash : { *(.gnu.hash) } :rodata
+	.rela.dyn : { *(.rela.*) } :rodata
+	.relr.dyn : { *(.relr.dyn) } :rodata
+	. = ALIGN(4096);
+	__rodata_end = .;
 
-	.data : AT(ADDR(.data) - KERNEL_VMA) {
+	.data : ALIGN(4096) {
 		__data_start = .;
+		/* Limine request markers and requests (kernel/boot.c) */
+		KEEP(*(.limine_requests_start))
+		KEEP(*(.limine_requests))
+		KEEP(*(.limine_requests_end))
 		*(.data .data.*)
 	} :data
 
-	.bss : AT(ADDR(.bss) - KERNEL_VMA) {
+	.bss : {
 		__bss_start = .;
 		*(.bss .bss.*)
 		*(COMMON)
@@ -88,12 +91,11 @@ SECTIONS
 	} :data
 
 	__kernel_end = .;
-	__kernel_phys_end = . - KERNEL_VMA;
 
 	/DISCARD/ : {
 		*(.eh_frame .eh_frame_hdr .eh_frame.*)
 		*(.note .note.*)
 		*(.comment)
-		*(.interp .dynsym .dynstr .dynamic .hash .gnu.hash)
+		*(.interp)
 	}
 }

@@ -4,6 +4,7 @@
  * timer.c - PIT channel 0 at HZ (1000) for the scheduler tick, and the
  * TSC (calibrated against PIT channel 2) for nanosecond timestamps.
  */
+#include <magia/apic.h>
 #include <magia/linker_set.h>
 #include <magia/sysctl.h>
 #include <magia/thread.h>
@@ -90,6 +91,7 @@ void timer_init(void)
 
 static void intr_sysinit(void)
 {
+	lapic_virtual_wire(); /* Limine masked LINT0, the 8259 path */
 	pic_init();
 	timer_init();
 	kprintf("timer: PIT %d Hz, TSC %lu.%03lu MHz\n", HZ, tsc_freq / 1000000,

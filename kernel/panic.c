@@ -14,17 +14,23 @@ volatile int panicking;
 uint64_t __stack_chk_guard __section(".data") = 0x595e9fbd94fda766ULL;
 
 struct ksym {
-	uint64_t addr;
-	const char *name;
+	uint64_t addr;     /* link-time address */
+	uint64_t name_off; /* into ksym_strtab */
 };
 extern const uint64_t ksym_count;
 extern const struct ksym ksym_table[];
+extern const char ksym_strtab[];
 extern char __text_start[], __text_end[];
 
+/* The table holds link-time addresses (nm of the first link pass); the
+ * running image is slid by KASLR, so look up addr - slide. */
 const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 {
 	uint64_t lo = 0, hi = ksym_count;
-	if (hi == 0 || addr < ksym_table[0].addr || addr >= (uint64_t)__text_end)
+	if (hi == 0 || addr < (uint64_t)__text_start || addr >= (uint64_t)__text_end)
+		return NULL;
+	addr -= kernel_virt_base - KERNEL_VMA;
+	if (addr < ksym_table[0].addr)
 		return NULL;
 	while (hi - lo > 1) {
 		uint64_t mid = (lo + hi) / 2;
@@ -35,7 +41,7 @@ const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 	}
 	if (offset)
 		*offset = addr - ksym_table[lo].addr;
-	return ksym_table[lo].name;
+	return ksym_strtab + ksym_table[lo].name_off;
 }
 
 static void print_frame(uint64_t rip)
@@ -54,7 +60,7 @@ void backtrace_from(uint64_t rbp, uint64_t rip)
 	if (rip)
 		print_frame(rip);
 	for (int depth = 0; depth < 16; depth++) {
-		if (rbp < KERNEL_VMA && rbp < PHYS_MAP_BASE)
+		if (rbp < dmap_base)
 			break;
 		if (rbp & 7)
 			break;

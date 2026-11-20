@@ -12,11 +12,10 @@
 #include <stdint.h>
 
 #define MAGIA_NAME    "Magia"
-#define MAGIA_RELEASE "0.1.0"
+#define MAGIA_RELEASE "0.2.0"
 
 /* Virtual memory layout (see docs/ARCHITECTURE.md). */
-#define KERNEL_VMA     0xffffffff80000000UL /* kernel image (-2 GiB)       */
-#define PHYS_MAP_BASE  0xffff800000000000UL /* direct map of physical RAM  */
+#define KERNEL_VMA     0xffffffff80000000UL /* kernel link base (-2 GiB); Limine adds the KASLR slide */
 #define USER_TOP       0x0000800000000000UL /* first non-canonical address */
 #define USER_WIN_BASE  0x0000000100000000UL /* user windows start at 4 GiB */
 
@@ -40,13 +39,18 @@
 
 #define STATIC_ASSERT(c, msg) _Static_assert(c, msg)
 
-static inline void *phys_to_virt(uint64_t pa) { return (void *)(pa + PHYS_MAP_BASE); }
+/* kernel/boot.c: the direct map of physical memory starts at dmap_base
+ * (Limine's randomised HHDM offset); the image is loaded at
+ * kernel_virt_base (link base + KASLR slide) from kernel_phys_base. */
+extern uint64_t dmap_base, kernel_virt_base, kernel_phys_base;
+
+static inline void *phys_to_virt(uint64_t pa) { return (void *)(pa + dmap_base); }
 static inline uint64_t virt_to_phys(const void *va)
 {
 	uint64_t v = (uint64_t)va;
-	if (v >= KERNEL_VMA)
-		return v - KERNEL_VMA;
-	return v - PHYS_MAP_BASE;
+	if (v >= kernel_virt_base)
+		return v - kernel_virt_base + kernel_phys_base;
+	return v - dmap_base;
 }
 
 /* printf.c */

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 [package]
 name = "magia_rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "BSD-2-Clause"
 description = "Magia kernel: Rust policy and subsystems (no_std, zero dependencies)"

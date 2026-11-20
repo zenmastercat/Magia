@@ -189,7 +189,7 @@ void kfree(void *p)
 	if (!p)
 		return;
 	uint64_t va = (uint64_t)p;
-	if (va < PHYS_MAP_BASE || va >= KERNEL_VMA)
+	if (va < dmap_base || va >= kernel_virt_base)
 		panic("kfree: %p is not a kmalloc pointer", p);
 	struct page *pg = pa_to_page(virt_to_phys(p));
 	if (!pg)

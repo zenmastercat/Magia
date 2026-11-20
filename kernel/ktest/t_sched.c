@@ -154,7 +154,7 @@ KTEST(207, many_threads_create_and_reap)
 		uint64_t now = pmm_free_pages();
 		if (round == 0)
 			before = now;
-		else
-			KT_EQ(now, before); /* stacks are freed: no growth per round */
+		else /* stacks (4 pages each) are freed; a kmalloc slab page may come or go */
+			KT_ASSERT(now + 2 >= before && now <= before + 2);
 	}
 }

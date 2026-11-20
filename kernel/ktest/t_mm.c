@@ -7,6 +7,7 @@
  * the kernel must survive it.
  */
 #include <magia/abi.h>
+#include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/ktest.h>
 #include <magia/mm.h>
@@ -61,24 +62,21 @@ KTEST(100, pmm_alloc_free_restores_count)
 
 KTEST(101, pmm_buddy_merge)
 {
+	/* Free an order-4 block as 16 single pages: the buddies must merge
+	 * back into one free block of order >= 4 covering it. */
 	uint64_t big = pmm_alloc(4);
 	KT_ASSERT(big != 0);
-	pmm_free(big, 4);
-	/* split it into 16 single pages by allocating them back... */
-	uint64_t pages[16];
-	int got = 0;
-	for (int i = 0; i < 16; i++) {
-		pages[i] = pmm_alloc(0);
-		if (pages[i] >= big && pages[i] < big + 16 * PAGE_SIZE)
-			got++;
-	}
-	KT_ASSERT(got > 0);
+	uint64_t before = pmm_free_pages();
 	for (int i = 0; i < 16; i++)
-		pmm_free(pages[i], 0);
-	/* ...and after freeing, an order-4 block is available at the same place */
-	uint64_t again = pmm_alloc(4);
-	KT_EQ(again, big);
-	pmm_free(again, 4);
+		pmm_free(big + i * PAGE_SIZE, 0);
+	KT_EQ(pmm_free_pages(), before + 16);
+	bool merged = false;
+	for (int o = 4; o <= MAX_ORDER && !merged; o++) {
+		struct page *head = pa_to_page(ALIGN_DOWN(big, PAGE_SIZE << o));
+		merged = head && (head->flags & PG_FREE) && head->order >= o;
+	}
+	KT_ASSERT(merged);
+	KT_ASSERT(!(pa_to_page(big + PAGE_SIZE)->flags & PG_FREE)); /* not a separate head */
 }
 
 static uint64_t rng = 0x9e3779b97f4a7c15ULL;
@@ -177,7 +175,8 @@ KTEST(113, null_and_unmapped_addresses_fault)
 	KT_EQ(try_access(do_read8, 0), PF);
 	KT_EQ(try_access(do_read8, 0xfff), PF);
 	KT_EQ(try_access(do_write8, 0x200000), PF);
-	KT_EQ(try_access(do_read8, KERNEL_VMA + (1ULL << 30)), PF); /* beyond the image */
+	extern char __kernel_end[];
+	KT_EQ(try_access(do_read8, ALIGN_UP((uint64_t)__kernel_end, 2ULL << 20) + PAGE_SIZE), PF); /* beyond the image */
 }
 
 KTEST(114, direct_map_alias_of_kernel_is_read_only)
@@ -303,4 +302,56 @@ KTEST(120, uvm_free_rejects_foreign_ranges)
 	KT_EQ(uvm_free(0, uva, 1), 0);
 	KT_EQ(uvm_free(0, uva, 1), -EINVAL); /* double free */
 	KT_EQ(uvm_alloc(0, 0, 0, &uva, NULL), -EINVAL);
+}
+
+/* All RAM is managed (no 1 GiB cap): allocate and touch frames above 4 GiB.
+ * The test boots with -m 8G, so RAM above 4 GiB exists. */
+KTEST(121, pmm_pages_above_4g)
+{
+	KT_ASSERT(pmm_max_phys() > (4ULL << 30));
+	enum { N = 1024 };
+	static uint64_t blk[N];
+	int n = 0, found = -1;
+	while (n < N && found < 0) {
+		uint64_t pa = pmm_alloc(MAX_ORDER);
+		if (!pa)
+			break;
+		blk[n] = pa;
+		if (pa >= (4ULL << 30))
+			found = n;
+		n++;
+	}
+	KT_ASSERT(found >= 0);
+	if (found >= 0) {
+		uint64_t pa = blk[found];
+		volatile uint64_t *p = phys_to_virt(pa);
+		volatile uint64_t *q = phys_to_virt(pa + (PAGE_SIZE << MAX_ORDER) - 8);
+		*p = pa ^ 0x5a5a5a5a5a5a5a5aULL;
+		*q = ~pa;
+		KT_EQ(*p, pa ^ 0x5a5a5a5a5a5a5a5aULL);
+		KT_EQ(*q, ~pa);
+		uint64_t tpa = 0;
+		KT_ASSERT(vmm_translate((uint64_t)p, &tpa, NULL));
+		KT_EQ(tpa, pa);
+	}
+	for (int i = 0; i < n; i++)
+		pmm_free(blk[i], MAX_ORDER);
+}
+
+/* Bootloader-reclaimable memory joined the allocator after the switch to
+ * Magia's page tables, and the allocator manages (nearly) all usable RAM. */
+KTEST(122, pmm_reclaims_bootloader_memory)
+{
+	extern uint64_t pmm_reclaimed_pages;
+	KT_ASSERT(pmm_reclaimed_pages > 0);
+	uint64_t ram = 0;
+	for (size_t i = 0; i < bootinfo.nmmap; i++)
+		if (bootinfo.mmap[i].type == MEM_USABLE || bootinfo.mmap[i].type == MEM_BOOT_RECLAIM)
+			ram += bootinfo.mmap[i].length;
+	uint64_t managed = pmm_total_pages() * PAGE_SIZE;
+	uint64_t array = ALIGN_UP((pmm_max_phys() >> PAGE_SHIFT) * sizeof(struct page), PAGE_SIZE);
+	KT_ASSERT(managed <= ram);
+	KT_ASSERT(managed + array + (1ULL << 20) >= ram); /* minus page array and low 1 MiB */
+	/* the direct map reaches the top of RAM */
+	KT_ASSERT(vmm_translate((uint64_t)phys_to_virt(pmm_max_phys() - PAGE_SIZE), NULL, NULL));
 }

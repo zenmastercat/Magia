@@ -114,7 +114,7 @@ trap_return:
 2:
 	iretq
 
-	.section .rodata
+	.section .data.rel.ro, "aw"	/* pointers: relocated by Limine, read-only after */
 	.align 8
 	.global isr_table
 isr_table:

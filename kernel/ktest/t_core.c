@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /* t_core.c - ktests for boot, CPU setup, traps and linker sets (0xx). */
+#include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/ktest.h>
+#include <magia/mm.h>
 #include <magia/sysctl.h>
 #include <magia/thread.h>
 #include <magia/trap.h>
@@ -112,4 +114,32 @@ KTEST(015, printf_formats)
 	KT_ASSERT(ok);
 	katol("12z", &ok);
 	KT_ASSERT(!ok);
+}
+
+/* Limine hand-off: KASLR slide, randomised direct map, symbols under the slide. */
+KTEST(004, boot_limine_kaslr_and_direct_map)
+{
+	extern char __text_start[], __kernel_start[];
+	KT_EQ(bootinfo.base_revision, 6);
+	KT_ASSERT(bootinfo.firmware == BOOT_FW_EFI64 || bootinfo.firmware == BOOT_FW_BIOS);
+	KT_ASSERT(kernel_virt_base >= KERNEL_VMA);
+	KT_EQ(kernel_virt_base & (PAGE_SIZE - 1), 0);
+	KT_EQ(kernel_virt_base, (uint64_t)__kernel_start); /* the image runs where Limine said */
+	KT_EQ(bootinfo.kernel_slide, kernel_virt_base - KERNEL_VMA);
+	KT_EQ(kernel_phys_base & (PAGE_SIZE - 1), 0);
+	/* direct map: in the higher half, below the image, translating to itself */
+	KT_ASSERT(dmap_base >= 0xffff800000000000ULL && dmap_base < KERNEL_VMA);
+	uint64_t pa = 0;
+	KT_ASSERT(vmm_translate((uint64_t)phys_to_virt(kernel_phys_base), &pa, NULL));
+	KT_EQ(pa, kernel_phys_base);
+	KT_ASSERT(vmm_translate((uint64_t)__text_start, &pa, NULL));
+	KT_EQ(pa, virt_to_phys(__text_start));
+	/* the symbol table stores link-time addresses: lookups subtract the slide */
+	uint64_t off = 1;
+	const char *name = ksym_lookup((uint64_t)ktest_run_all, &off);
+	KT_ASSERT(name && strcmp(name, "ktest_run_all") == 0);
+	KT_EQ(off, 0);
+	/* the boot copy of Limine's data is complete */
+	KT_ASSERT(bootinfo.nmmap > 0 && bootinfo.rsdp_pa != 0);
+	KT_ASSERT(strcmp(kernel_cmdline, bootinfo.cmdline) == 0);
 }

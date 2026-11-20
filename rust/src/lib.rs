@@ -17,8 +17,8 @@
 
 extern crate alloc;
 
-pub const RELEASE: &str = "0.1.0";
-pub const VERSION: &str = "Magia 0.1.0 (experimental, not derived from Linux or FreeBSD)";
+pub const RELEASE: &str = "0.2.0";
+pub const VERSION: &str = "Magia 0.2.0 (experimental; adapted BSD code is listed in docs/THIRD_PARTY.md)";
 
 #[macro_export]
 macro_rules! kprint {

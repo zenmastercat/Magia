@@ -3,17 +3,21 @@
 /*
  * vmm.c - 4-level page tables with W^X.
  *
- * Replaces the boot tables (which map 1 GiB RWX three times) with:
+ * Replaces Limine's boot page tables with:
  *   .text    RX          (4 KiB pages, global)
  *   .rodata  R  + NX
  *   .data/.bss RW + NX
- *   direct map of RAM at PHYS_MAP_BASE: RW + NX (2 MiB pages), except the
- *     frames of the kernel image itself, which are read-only there, so the
- *     image has no writable alias of its code.
+ *   direct map at dmap_base (Limine's randomised HHDM offset) of every RAM,
+ *     ACPI and firmware-data range in the memory map: RW + NX, write-back,
+ *     2 MiB pages where aligned, no size cap; the frames of the kernel image
+ *     itself are read-only there, so the image has no writable alias of its
+ *     code. The framebuffer is mapped write-combining, MMIO uncached on
+ *     demand (vmm_map_mmio); reserved ranges and holes are not mapped.
  *   nothing at virtual address 0 (NULL dereferences fault).
  * No mapping is ever both writable and executable (checked by ktest 1xx).
  * User windows (uvm.c) live below USER_TOP with the U bit.
  */
+#include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/linker_set.h>
 #include <magia/mm.h>
@@ -21,7 +25,7 @@
 #include <magia/x86.h>
 
 extern char __text_start[], __text_end[], __rodata_start[], __rodata_end[];
-extern char __data_start[], __bss_end[], __kernel_phys_start[], __kernel_phys_end[];
+extern char __data_start[], __bss_end[], __kernel_start[], __kernel_end[];
 
 bool nx_enabled;
 static uint64_t *kernel_pml4;
@@ -124,6 +128,57 @@ static void map_range_4k(uint64_t va, uint64_t va_end, uint64_t flags)
 	}
 }
 
+#define SZ_2M (2ULL << 20)
+
+/* Direct-map physical [s, e) at dmap_base + pa: 2 MiB pages where a whole
+ * aligned 2 MiB frame lies inside the range (if big), 4 KiB pages elsewhere. */
+static void dmap_range(uint64_t s, uint64_t e, uint64_t flags, bool big)
+{
+	s = ALIGN_DOWN(s, PAGE_SIZE);
+	e = ALIGN_UP(e, PAGE_SIZE);
+	while (s < e) {
+		if (big && (s & (SZ_2M - 1)) == 0 && e - s >= SZ_2M) {
+			uint64_t *pde = walk(kernel_pml4, dmap_base + s, 2, true);
+			if (pde && !(*pde & PTE_P)) {
+				*pde = s | flags | PTE_PS | PTE_P;
+				s += SZ_2M;
+				continue;
+			}
+		}
+		uint64_t *pte = walk(kernel_pml4, dmap_base + s, 1, true);
+		if (pte) /* NULL: already inside a 2 MiB mapping */
+			*pte = s | flags | PTE_P;
+		s += PAGE_SIZE;
+	}
+}
+
+/* Memory the direct map covers with write-back caching: RAM, the kernel,
+ * ACPI tables and the firmware data Limine maps (SMBIOS, EFI runtime).
+ * Never MMIO or plain "reserved" ranges. */
+static bool dmap_wb_type(uint64_t t)
+{
+	return t == MEM_USABLE || t == MEM_BOOT_RECLAIM || t == MEM_KERNEL || t == MEM_ACPI_RECLAIM ||
+	       t == MEM_ACPI_NVS || t == MEM_RESERVED_MAPPED;
+}
+
+/* WB-map [s, e) RW, except the kernel image's own frames, which are
+ * read-only there so the image has no writable alias of its code. */
+static void dmap_wb(uint64_t s, uint64_t e, uint64_t kps, uint64_t kpe)
+{
+	uint64_t rw = PTE_W | PTE_G | nx();
+	if (e <= kps || s >= kpe) {
+		dmap_range(s, e, rw, true);
+		return;
+	}
+	if (s < kps)
+		dmap_range(s, kps, rw, true);
+	dmap_range(MAX(s, kps), MIN(e, kpe), PTE_G | nx(), false);
+	if (e > kpe)
+		dmap_range(kpe, e, rw, true);
+}
+
+uint64_t vmm_dmap_bytes;
+
 void vmm_init(void)
 {
 	nx_enabled = (rdmsr(MSR_EFER) & EFER_NXE) != 0;
@@ -138,26 +193,48 @@ void vmm_init(void)
 	map_range_4k((uint64_t)__rodata_start, (uint64_t)__rodata_end, PTE_G | nx());
 	map_range_4k((uint64_t)__data_start, (uint64_t)__bss_end, PTE_G | PTE_W | nx());
 
-	/* direct map */
-	uint64_t kps = ALIGN_DOWN((uint64_t)__kernel_phys_start, PAGE_SIZE);
-	uint64_t kpe = ALIGN_UP((uint64_t)__kernel_phys_end, PAGE_SIZE);
-	uint64_t top = ALIGN_UP(pmm_max_phys(), 2ULL << 20);
-	for (uint64_t pa = 0; pa < top; pa += 2ULL << 20) {
-		uint64_t va = PHYS_MAP_BASE + pa;
-		if (pa + (2ULL << 20) <= kps || pa >= kpe) {
-			uint64_t *pde = walk(kernel_pml4, va, 2, true);
-			*pde = pa | PTE_P | PTE_W | PTE_PS | PTE_G | nx();
-		} else {
-			for (uint64_t p = pa; p < pa + (2ULL << 20); p += PAGE_SIZE) {
-				uint64_t *pte = walk(kernel_pml4, PHYS_MAP_BASE + p, 1, true);
-				bool image = p >= kps && p < kpe;
-				*pte = p | PTE_P | PTE_G | nx() | (image ? 0 : PTE_W);
-			}
+	/* direct map: merge the (sorted, possibly overlapping) WB entries */
+	uint64_t kps = virt_to_phys(__kernel_start);
+	uint64_t kpe = ALIGN_UP(kps + ((uint64_t)__kernel_end - (uint64_t)__kernel_start), PAGE_SIZE);
+	uint64_t cs = 0, ce = 0;
+	for (size_t i = 0; i <= bootinfo.nmmap; i++) {
+		const struct boot_mmap_entry *m = i < bootinfo.nmmap ? &bootinfo.mmap[i] : NULL;
+		if (m && !dmap_wb_type(m->type))
+			continue;
+		uint64_t s = m ? ALIGN_DOWN(m->base, PAGE_SIZE) : ~0ULL;
+		uint64_t e = m ? ALIGN_UP(m->base + m->length, PAGE_SIZE) : ~0ULL;
+		if (m && ce > cs && s <= ce) {
+			ce = MAX(ce, e);
+			continue;
 		}
+		if (ce > cs) {
+			dmap_wb(cs, ce, kps, kpe);
+			vmm_dmap_bytes += ce - cs;
+		}
+		cs = s;
+		ce = e;
+	}
+	/* the framebuffer, write-combining (PAT entry 5, as Limine programs the PAT) */
+	if (bootinfo.fb.pa) {
+		uint64_t len = bootinfo.fb.pitch * bootinfo.fb.height;
+		dmap_range(bootinfo.fb.pa, bootinfo.fb.pa + len, PTE_W | PTE_G | nx() | PTE_PAT | PTE_PWT, false);
 	}
 	write_cr3(virt_to_phys(kernel_pml4));
-	kprintf("vmm: W^X kernel page tables active (text RX, rodata R, data RW, NX %s), %lu table pages\n",
-		nx_enabled ? "on" : "off", vmm_pt_pages);
+	kprintf("vmm: W^X kernel page tables active (text RX, rodata R, data RW, NX %s), direct map %lu MiB, %lu table pages\n",
+		nx_enabled ? "on" : "off", vmm_dmap_bytes >> 20, vmm_pt_pages);
+}
+
+void *vmm_map_mmio(uint64_t pa, uint64_t len)
+{
+	uint64_t s = ALIGN_DOWN(pa, PAGE_SIZE), e = ALIGN_UP(pa + len, PAGE_SIZE);
+	for (uint64_t p = s; p < e; p += PAGE_SIZE) {
+		uint64_t f;
+		if (vmm_translate(dmap_base + p, NULL, &f))
+			continue; /* already covered (e.g. a firmware region) */
+		if (vmm_map(dmap_base + p, p, PTE_W | PTE_G | PTE_PCD | PTE_PWT | PTE_NX) != 0)
+			return NULL;
+	}
+	return phys_to_virt(pa);
 }
 
 static void vmm_sysinit(void) { vmm_init(); }

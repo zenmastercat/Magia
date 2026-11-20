@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /*
- * console.c - COM1 (16550 UART) and VGA text console.
+ * console.c - COM1 (16550 UART) console.
  *
- * Output goes to both devices; serial is the primary console (QEMU
- * -nographic, the test harness and the magia> monitor all use it).
+ * Serial is the primary console (QEMU -nographic, the test harness and the
+ * magia> monitor all use it). UEFI machines have no VGA text mode.
  * Input arrives on IRQ4 into a small ring buffer; console_getc_wait()
  * sleeps until a byte is available.
  */
@@ -15,12 +15,8 @@
 #include <magia/x86.h>
 
 #define COM1 0x3f8
-#define VGA_COLS 80
-#define VGA_ROWS 25
 
 static spinlock_t con_lock = SPINLOCK_INIT("console");
-static uint16_t *vga;
-static int vga_x, vga_y;
 static bool serial_ok;
 
 static void serial_putc(char c)
@@ -32,45 +28,11 @@ static void serial_putc(char c)
 	outb(COM1, (uint8_t)c);
 }
 
-static void vga_scroll(void)
-{
-	memmove(vga, vga + VGA_COLS, (VGA_ROWS - 1) * VGA_COLS * 2);
-	for (int x = 0; x < VGA_COLS; x++)
-		vga[(VGA_ROWS - 1) * VGA_COLS + x] = 0x0700 | ' ';
-	vga_y = VGA_ROWS - 1;
-}
-
-static void vga_putc(char c)
-{
-	if (!vga)
-		return;
-	if (c == '\n') {
-		vga_x = 0;
-		if (++vga_y >= VGA_ROWS)
-			vga_scroll();
-		return;
-	}
-	if (c == '\r')
-		return;
-	if (c == '\b') {
-		if (vga_x > 0)
-			vga_x--;
-		return;
-	}
-	vga[vga_y * VGA_COLS + vga_x] = 0x0700 | (uint8_t)c;
-	if (++vga_x >= VGA_COLS) {
-		vga_x = 0;
-		if (++vga_y >= VGA_ROWS)
-			vga_scroll();
-	}
-}
-
 static void putc_locked(char c)
 {
 	if (c == '\n')
 		serial_putc('\r');
 	serial_putc(c);
-	vga_putc(c);
 }
 
 void console_init(void)
@@ -83,11 +45,6 @@ void console_init(void)
 	outb(COM1 + 2, 0xc7); /* FIFO on, clear, 14-byte threshold */
 	outb(COM1 + 4, 0x0b); /* DTR, RTS, OUT2 (IRQ line enable) */
 	serial_ok = inb(COM1 + 5) != 0xff;
-
-	vga = phys_to_virt(0xb8000);
-	for (int i = 0; i < VGA_COLS * VGA_ROWS; i++)
-		vga[i] = 0x0700 | ' ';
-	vga_x = vga_y = 0;
 }
 
 void console_write(const char *s, size_t n)

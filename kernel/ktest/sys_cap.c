@@ -99,7 +99,7 @@ KTEST(304, syscalls_reject_kernel_and_bad_pointers)
 	KT_EQ(ksys3(SYS_write, 1, (uint64_t)kbuf, 4), KT_NEG(EFAULT));
 	KT_EQ(ksys3(SYS_read, 0, (uint64_t)&ktest_checks, 4), KT_NEG(EFAULT));
 	KT_EQ(ksys2(SYS_fstat, 0, KERNEL_VMA), KT_NEG(EFAULT));
-	KT_EQ(ksys1(SYS_uname, PHYS_MAP_BASE), KT_NEG(EFAULT));
+	KT_EQ(ksys1(SYS_uname, dmap_base), KT_NEG(EFAULT));
 	/* null, unmapped, straddling USER_TOP, wrapping */
 	KT_EQ(ksys3(SYS_write, 1, 0, 4), KT_NEG(EFAULT));
 	KT_EQ(ksys3(SYS_write, 1, 0x1000, 4), KT_NEG(EFAULT));

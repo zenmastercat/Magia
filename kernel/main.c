@@ -4,6 +4,7 @@
  * main.c - kmain: banner, SYSINIT hooks in link-time order, then either
  * the in-kernel test run (cmdline "ktest") or the magia> debug monitor.
  */
+#include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/ktest.h>
 #include <magia/linker_set.h>
@@ -12,13 +13,10 @@
 #include <magia/trap.h>
 #include <magia/x86.h>
 
-#define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
-
 char kernel_cmdline[256];
 bool ktest_exit_mode;
-extern uint64_t boot_mbi_phys;
 void monitor_main(void);
-void kmain(uint32_t magic, uint32_t mbi_phys);
+void kmain(void);
 
 bool cmdline_has(const char *word)
 {
@@ -62,26 +60,24 @@ static void crash_tests(void)
 	if (cmdline_has("crash=canary"))
 		crash_thread_canary();
 	if (cmdline_has("crash=wx")) {
-		*(volatile uint8_t *)(uint64_t)kmain = 0xcc;
+		*(volatile uint8_t *)(uintptr_t)kmain = 0xcc;
 	}
 }
 
 static void interrupts_on(void) { sti(); }
 SYSINIT(interrupts_on, 50001, interrupts_on); /* after sched_init (SI_ORDER_SCHED) */
 
-void kmain(uint32_t magic, uint32_t mbi_phys)
+void kmain(void)
 {
 	console_init();
 	kprintf("\n" MAGIA_NAME " " MAGIA_RELEASE " (x86_64) - experimental hobby/research kernel\n");
-	kprintf("Written from scratch in C and Rust; ideas from FreeBSD and Linux, no code from either.\n");
-	if (magic != MULTIBOOT_BOOTLOADER_MAGIC)
-		panic("not booted by a multiboot loader (magic %x)", magic);
-	boot_mbi_phys = mbi_phys;
-	const uint32_t *mbi = phys_to_virt(mbi_phys);
-	if (mbi[0] & (1 << 2))
-		strlcpy(kernel_cmdline, phys_to_virt(mbi[4]), sizeof(kernel_cmdline));
+	kprintf("C and Rust; BSD-licensed FreeBSD/OpenBSD code where noted (docs/THIRD_PARTY.md), Linux ideas only.\n");
+	strlcpy(kernel_cmdline, bootinfo.cmdline, sizeof(kernel_cmdline));
 	ktest_exit_mode = cmdline_has("ktest");
 	kprintf("cmdline: \"%s\"\n", kernel_cmdline);
+	kprintf("boot: Limine base revision %lu, %s firmware, %zu memory map entries, KASLR %s\n",
+		bootinfo.base_revision, bootinfo.firmware == BOOT_FW_BIOS ? "BIOS" : "UEFI", bootinfo.nmmap,
+		bootinfo.kernel_slide ? "on" : "off");
 
 	const struct sysinit *const *si;
 	MAGIA_SET_FOREACH(si, sysinit) {

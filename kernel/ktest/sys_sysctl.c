@@ -120,5 +120,5 @@ KTEST(805, uname_reports_magia)
 	KT_EQ(strcmp(un.release, MAGIA_RELEASE), 0);
 	KT_EQ(strcmp(un.machine, "x86_64"), 0);
 	KT_EQ(strcmp(un.nodename, "magia"), 0);
-	KT_EQ(strncmp(un.version, "Magia 0.1.0 (experimental", 25), 0);
+	KT_EQ(strncmp(un.version, "Magia 0.2.0 (experimental", 25), 0);
 }

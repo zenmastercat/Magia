@@ -124,7 +124,7 @@ void cpu_init(void)
 	if (cpu_feat.nx)
 		efer |= EFER_NXE;
 	wrmsr(MSR_EFER, efer);
-	uint64_t cr4 = read_cr4();
+	uint64_t cr4 = read_cr4() | CR4_PGE; /* Limine leaves PGE off; kernel PTEs are global */
 	if (cpu_feat.smep) {
 		cr4 |= CR4_SMEP;
 		smep_enabled = true;

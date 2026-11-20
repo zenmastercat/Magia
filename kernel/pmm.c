@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /*
- * pmm.c - physical memory: a binary buddy allocator over the multiboot
- * memory map, with one struct page per 4 KiB frame.
+ * pmm.c - physical memory: a binary buddy allocator over the Limine
+ * memory map (all of RAM, no size cap), with one struct page per 4 KiB frame.
  *
  * Idea: the classic buddy system (Knowlton 1965), as used by Linux's page
  * allocator; FreeBSD's vm_phys uses the same idea. A free block of order k
@@ -10,13 +10,11 @@
  * Freeing merges with the buddy while the buddy is a free block of the same
  * order. Free lists are doubly linked through struct page.
  */
+#include <magia/boot.h>
 #include <magia/linker_set.h>
 #include <magia/mm.h>
 #include <magia/spinlock.h>
 #include <magia/sysctl.h>
-
-extern char __kernel_phys_start[], __kernel_phys_end[];
-extern uint32_t boot_mb_info;
 
 static struct page *pages;
 static uint64_t npages;          /* frames covered by `pages` */
@@ -29,17 +27,6 @@ static uint64_t max_phys;
 
 SYSCTL_U64_RO(vm_free_pages_c, "vm.pmm.free_pages", &free_pages, "free 4 KiB frames (buddy)");
 SYSCTL_U64_RO(vm_total_pages_c, "vm.pmm.total_pages", &total_pages, "usable 4 KiB frames");
-
-struct __packed mb_info {
-	uint32_t flags, mem_lower, mem_upper, boot_device, cmdline, mods_count, mods_addr;
-	uint32_t syms[4];
-	uint32_t mmap_length, mmap_addr;
-};
-struct __packed mb_mmap {
-	uint32_t size;
-	uint64_t addr, len;
-	uint32_t type;
-};
 
 struct page *pa_to_page(uint64_t pa)
 {
@@ -162,6 +149,7 @@ static void add_range(uint64_t start, uint64_t end)
 {
 	uint64_t pfn = ALIGN_UP(start, PAGE_SIZE) >> PAGE_SHIFT;
 	uint64_t last = ALIGN_DOWN(end, PAGE_SIZE) >> PAGE_SHIFT;
+	last = MIN(last, npages);
 	while (pfn < last) {
 		int order = 0;
 		while (order < MAX_ORDER && !(pfn & ((2ULL << order) - 1)) && pfn + (2ULL << order) <= last)
@@ -174,80 +162,94 @@ static void add_range(uint64_t start, uint64_t end)
 	}
 }
 
-void pmm_init(uint64_t mbi_phys)
+/* Types whose frames get a struct page (RAM the allocator may own one day). */
+static bool is_ram(uint64_t type)
 {
-	const struct mb_info *mbi = phys_to_virt(mbi_phys);
-	if (!(mbi->flags & (1 << 6)))
-		panic("pmm: bootloader gave no memory map");
-	uint64_t kstart = (uint64_t)__kernel_phys_start;
-	uint64_t kend = ALIGN_UP((uint64_t)__kernel_phys_end, PAGE_SIZE);
+	return type == MEM_USABLE || type == MEM_BOOT_RECLAIM || type == MEM_KERNEL;
+}
 
-	/* pass 1: highest usable address (only the first 1 GiB is mapped yet) */
-	const uint8_t *p = phys_to_virt(mbi->mmap_addr), *e = p + mbi->mmap_length;
-	for (const uint8_t *q = p; q < e; q += ((const struct mb_mmap *)q)->size + 4) {
-		const struct mb_mmap *m = (const void *)q;
-		if (m->type == 1 && m->addr + m->len > max_phys)
-			max_phys = m->addr + m->len;
+/* Low 1 MiB stays reserved: real-mode trampolines (SMP bring-up) and BIOS data. */
+#define LOW_RESERVED 0x100000ULL
+
+static uint64_t array_pa, array_bytes;
+uint64_t pmm_reclaimed_pages;
+SYSCTL_U64_RO(vm_reclaimed_c, "vm.pmm.reclaimed_pages", &pmm_reclaimed_pages,
+	      "bootloader-reclaimable frames given to the allocator");
+
+/* Free [s, e) except the low 1 MiB and the page array. */
+static void add_usable(uint64_t s, uint64_t e)
+{
+	s = MAX(s, LOW_RESERVED);
+	uint64_t as = array_pa, ae = array_pa + array_bytes;
+	if (e <= s)
+		return;
+	if (e <= as || s >= ae) {
+		add_range(s, e);
+		return;
 	}
-	if (max_phys > (1ULL << 30))
-		max_phys = 1ULL << 30; /* Magia 0.1 manages at most 1 GiB */
+	if (s < as)
+		add_range(s, as);
+	if (e > ae)
+		add_range(ae, e);
+}
+
+void pmm_init(void)
+{
+	const struct bootinfo *bi = &bootinfo;
+	for (size_t i = 0; i < bi->nmmap; i++) {
+		const struct boot_mmap_entry *m = &bi->mmap[i];
+		if (is_ram(m->type) && m->base + m->length > max_phys)
+			max_phys = m->base + m->length;
+	}
+	max_phys = ALIGN_UP(max_phys, PAGE_SIZE);
 	npages = max_phys >> PAGE_SHIFT;
 
-	/* pass 2: place the page array in the first usable range above the kernel */
-	uint64_t array_bytes = ALIGN_UP(npages * sizeof(struct page), PAGE_SIZE);
-	uint64_t array_pa = 0;
-	for (const uint8_t *q = p; q < e && !array_pa; q += ((const struct mb_mmap *)q)->size + 4) {
-		const struct mb_mmap *m = (const void *)q;
-		uint64_t s = ALIGN_UP(MAX(m->addr, kend), PAGE_SIZE), end = MIN(m->addr + m->len, max_phys);
-		if (m->type == 1 && end > s && end - s >= array_bytes)
+	/* The page array goes in the first usable range above 1 MiB that fits.
+	 * shortcut: one contiguous array (40 bytes per frame, 320 MiB for 32 GiB),
+	 * switch to per-range arrays (FreeBSD vm_phys_seg) for sparse NUMA maps. */
+	array_bytes = ALIGN_UP(npages * sizeof(struct page), PAGE_SIZE);
+	for (size_t i = 0; i < bi->nmmap && !array_pa; i++) {
+		const struct boot_mmap_entry *m = &bi->mmap[i];
+		uint64_t s = MAX(m->base, LOW_RESERVED), e = m->base + m->length;
+		if (m->type == MEM_USABLE && e > s && e - s >= array_bytes)
 			array_pa = s;
 	}
 	if (!array_pa)
-		panic("pmm: no room for the page array");
+		panic("pmm: no room for the page array (%lu KiB)", array_bytes >> 10);
 	pages = phys_to_virt(array_pa);
 	memset(pages, 0, array_bytes);
 	for (uint64_t i = 0; i < npages; i++)
 		pages[i].flags = PG_RESERVED;
 
-	/* pass 3: free usable RAM except low 1 MiB, the kernel image, the page
-	 * array and the multiboot structures (read by kmain/pmm only, but keep
-	 * the first page of them for the debugger). */
-	uint64_t mbi_pg = ALIGN_DOWN(mbi_phys, PAGE_SIZE);
-	for (const uint8_t *q = p; q < e; q += ((const struct mb_mmap *)q)->size + 4) {
-		const struct mb_mmap *m = (const void *)q;
-		if (m->type != 1)
-			continue;
-		uint64_t s = MAX(m->addr, 0x100000ULL), end = MIN(m->addr + m->len, max_phys);
-		/* cut out [kstart, kend), [array], [mbi page] by splitting */
-		uint64_t cuts[3][2] = { { kstart, kend }, { array_pa, array_pa + array_bytes },
-					{ mbi_pg, mbi_pg + PAGE_SIZE } };
-		uint64_t pieces[8][2];
-		int n = 0;
-		pieces[n][0] = s;
-		pieces[n][1] = end;
-		n++;
-		for (int c = 0; c < 3; c++) {
-			int m2 = n;
-			for (int i = 0; i < m2; i++) {
-				uint64_t a = pieces[i][0], b = pieces[i][1];
-				if (b <= cuts[c][0] || a >= cuts[c][1])
-					continue;
-				pieces[i][1] = MAX(a, MIN(b, cuts[c][0]));
-				if (b > cuts[c][1] && n < 8) {
-					pieces[n][0] = cuts[c][1];
-					pieces[n][1] = b;
-					n++;
-				}
-			}
-		}
-		for (int i = 0; i < n; i++)
-			if (pieces[i][1] > pieces[i][0])
-				add_range(pieces[i][0], pieces[i][1]);
+	/* Usable RAM only: bootloader-reclaimable memory still holds Limine's
+	 * page tables, stack and GDT until pmm_reclaim() runs. */
+	for (size_t i = 0; i < bi->nmmap; i++) {
+		const struct boot_mmap_entry *m = &bi->mmap[i];
+		if (m->type == MEM_USABLE)
+			add_usable(m->base, m->base + m->length);
 	}
-	kprintf("pmm: %lu MiB usable, %lu pages free, page array %lu KiB at %p\n",
-		(total_pages * PAGE_SIZE) >> 20, free_pages, array_bytes >> 10, (void *)array_pa);
+	kprintf("pmm: %lu MiB usable, max phys %p, page array %lu KiB at %p\n",
+		(total_pages * PAGE_SIZE) >> 20, (void *)max_phys, array_bytes >> 10, (void *)array_pa);
 }
 
-uint64_t boot_mbi_phys;
-static void pmm_sysinit(void) { pmm_init(boot_mbi_phys); }
+/* After vmm_init() switched to Magia's page tables and cpu.c loaded the
+ * kernel's own GDT, nothing references bootloader memory any more
+ * (boot_early() copied the responses into `bootinfo`). */
+static void pmm_reclaim(void)
+{
+	uint64_t before = total_pages;
+	spin_lock(&pmm_lock);
+	for (size_t i = 0; i < bootinfo.nmmap; i++) {
+		const struct boot_mmap_entry *m = &bootinfo.mmap[i];
+		if (m->type == MEM_BOOT_RECLAIM)
+			add_usable(m->base, m->base + m->length);
+	}
+	spin_unlock(&pmm_lock);
+	pmm_reclaimed_pages = total_pages - before;
+	kprintf("pmm: reclaimed %lu KiB of bootloader memory, %lu MiB managed\n",
+		pmm_reclaimed_pages * 4, (total_pages * PAGE_SIZE) >> 20);
+}
+
+static void pmm_sysinit(void) { pmm_init(); }
 SYSINIT(pmm, SI_ORDER_VM, pmm_sysinit);
+SYSINIT(pmm_reclaim, 20002, pmm_reclaim); /* right after vmm (20001) */

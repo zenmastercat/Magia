@@ -11,6 +11,9 @@ pkgs.mkShell {
     rustup
     qemu
     python3
+    curl     # fetches the pinned Limine release (Makefile)
+    mtools   # builds the FAT32 ESP without root
+    gptfdisk # sgdisk: GPT partition table on the image file
   ];
   # The Nix cc-wrapper would otherwise inject userland hardening flags
   # (-fPIE, _FORTIFY_SOURCE, ...) that make no sense for a freestanding
@@ -18,5 +21,7 @@ pkgs.mkShell {
   hardeningDisable = [ "all" ];
   shellHook = ''
     export RUSTUP_TOOLCHAIN_AUTO_INSTALL=1
+    # UEFI firmware for QEMU (tests boot the image through it)
+    export OVMF_FD=${pkgs.OVMF.fd}/FV/OVMF.fd
   '';
 }

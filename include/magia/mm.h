@@ -28,8 +28,8 @@ struct page {
 #define PG_LARGE    0x08u /* head of a large kmalloc allocation          */
 #define PG_USER     0x10u /* mapped into a user window                   */
 
-/* pmm.c: buddy allocator over the multiboot memory map */
-void pmm_init(uint64_t mbi_phys);
+/* pmm.c: buddy allocator over the Limine memory map */
+void pmm_init(void);
 uint64_t pmm_alloc(int order); /* returns physical address or 0 */
 void pmm_free(uint64_t pa, int order);
 uint64_t pmm_free_pages(void);
@@ -50,6 +50,7 @@ void pmm_dump(void);
 #define PTE_A   (1ULL << 5)
 #define PTE_D   (1ULL << 6)
 #define PTE_PS  (1ULL << 7)
+#define PTE_PAT (1ULL << 7) /* in a 4 KiB PTE; PAT|PWT = entry 5 = WC */
 #define PTE_G   (1ULL << 8)
 #define PTE_NX  (1ULL << 63)
 #define PTE_ADDR_MASK 0x000ffffffffff000ULL
@@ -58,6 +59,8 @@ void vmm_init(void);
 int vmm_map(uint64_t va, uint64_t pa, uint64_t flags);
 uint64_t vmm_unmap(uint64_t va); /* returns old physical address or 0 */
 bool vmm_translate(uint64_t va, uint64_t *pa, uint64_t *flags);
+void *vmm_map_mmio(uint64_t pa, uint64_t len); /* uncached, at dmap_base + pa */
+extern uint64_t vmm_dmap_bytes;
 extern bool nx_enabled;
 
 /* User windows: page ranges below USER_TOP in the single shared address
