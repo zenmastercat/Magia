@@ -51,6 +51,14 @@ void pic_unmask(int irq)
 	irq_restore(f);
 }
 
+void pic_mask_all(void)
+{
+	uint64_t f = irq_save();
+	irq_mask = 0xffff;
+	pic_write_mask();
+	irq_restore(f);
+}
+
 void pic_mask(int irq)
 {
 	uint64_t f = irq_save();

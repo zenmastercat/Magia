@@ -14,9 +14,12 @@
 #   3. crash:   negative tests of the hardening - each boot must panic with
 #               a specific message (stack protector, thread stack canary,
 #               write to kernel text).
-#   4. bigmem:  boot "ktest" with -m 32G (BIGMEM_MEM; falls back to the
+#   4. bigmem:  boot "ktest nox2apic" with -m 32G (BIGMEM_MEM; falls back to the
 #               largest size QEMU can allocate and says so).
 #   5. bios:    boot "ktest" through SeaBIOS (Limine BIOS stages).
+#   6. noapic:  boot "ktest noapic" (8259 PIC + PIT path).
+#   7. kvm:     boot "ktest" with -accel kvm -cpu host when /dev/kvm is
+#               usable (x2APIC + TSC-deadline timer); skipped otherwise.
 # Exits non-zero on any failure. Logs go to build/*.log.
 set -u
 
@@ -142,8 +145,8 @@ rm -f "$LOGDIR"/crash-*.status
 if [ "${BIGMEM:-1}" = 1 ]; then
 	log="$LOGDIR/ktest-bigmem.log"
 	for mem in ${BIGMEM_MEM:-32G 24G 16G}; do
-		echo "== bigmem: ktest with -m $mem"
-		QEMU_MEM=$mem qemu "ktest" </dev/null >"$log" 2>&1
+		echo "== bigmem: ktest with -m $mem (and nox2apic: the xAPIC MMIO path)"
+		QEMU_MEM=$mem qemu "ktest nox2apic" </dev/null >"$log" 2>&1
 		st=$?
 		if grep -q 'cannot set up guest memory' "$log"; then
 			echo "   QEMU could not allocate $mem on this host, trying less"
@@ -161,6 +164,26 @@ log="$LOGDIR/ktest-bios.log"
 echo "== bios: ktest booted through SeaBIOS + Limine BIOS"
 OVMF=bios qemu "ktest" </dev/null >"$log" 2>&1
 check_ktest "$log" $? "bios boot"
+
+# ---------------------------------------------------------------- 6. noapic
+log="$LOGDIR/ktest-noapic.log"
+echo "== noapic: ktest on the legacy 8259 PIC + PIT path"
+qemu "ktest noapic" </dev/null >"$log" 2>&1
+check_ktest "$log" $? "noapic"
+
+# ---------------------------------------------------------------- 7. KVM
+# Hardware virtualisation with the host CPU model: x2APIC and the
+# TSC-deadline timer (TCG offers x2APIC but no TSC deadline).
+if [ -r /dev/kvm ] && [ -w /dev/kvm ] && [ "${KVM:-1}" = 1 ]; then
+	log="$LOGDIR/ktest-kvm.log"
+	echo "== kvm: ktest with -accel kvm -cpu host"
+	QEMU_ACCEL=kvm QEMU_CPU=host qemu "ktest" </dev/null >"$log" 2>&1
+	st=$?
+	tr -d '\r' <"$log" | grep -E '^intr:' | sed 's/^/   /'
+	check_ktest "$log" $st "kvm"
+else
+	echo "== kvm: skipped (no usable /dev/kvm)"
+fi
 
 if [ $fail -ne 0 ]; then
 	echo "run-ktest: FAILED"

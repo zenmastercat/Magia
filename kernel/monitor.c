@@ -173,7 +173,6 @@ static size_t read_line(char *buf, size_t size)
 
 void monitor_main(void)
 {
-	console_input_init();
 	kprintf("Type 'help' for monitor commands.\n");
 	char line[128];
 	for (;;) {

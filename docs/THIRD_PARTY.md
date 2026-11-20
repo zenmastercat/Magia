@@ -12,6 +12,7 @@ header. Nothing here is GPL or CDDL; Linux is used for ideas only
 |---|---|---|---|
 | `include/limine.h` | Limine boot protocol header, `limine-protocol/include/limine.h` from the Limine 12.10.0 release tarball (Mintsuki and contributors) | 0BSD | none (verbatim) |
 | `kernel/font/spleen8x16.h` | Spleen 8x16 font, OpenBSD `sys/dev/wsfont/spleen8x16.h` rev 1.7 (Frederic Cambus, 2018-2020); OpenBSD src commit 8e1a11b4 | BSD-2-Clause | none (verbatim); `kernel/fbcon.c` supplies the few `wsdisplay_font` declarations it expects |
+| `include/magia/apicreg.h` | FreeBSD `sys/x86/include/apicreg.h` (Peter Wemm and Steve Passe, 1996), FreeBSD src commit 90bc40e2 | BSD-2-Clause (FreeBSD variant: clause 2 forbids using the developer's name for endorsement) | subset: register index enum and LAPIC, LVT, timer and I/O APIC field definitions verbatim; memory-layout structs dropped; Magia header guard and a note added below the original copyright |
 
 ## Fetched at build time (not in git)
 

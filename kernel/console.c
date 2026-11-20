@@ -11,6 +11,7 @@
  */
 #include <magia/fbcon.h>
 #include <magia/kernel.h>
+#include <magia/linker_set.h>
 #include <magia/spinlock.h>
 #include <magia/thread.h>
 #include <magia/trap.h>
@@ -124,3 +125,6 @@ int console_getc_wait(void)
 		sleep_commit();
 	}
 }
+
+static void console_input_sysinit(void) { console_input_init(); }
+SYSINIT(console_input, 40002, console_input_sysinit); /* after interrupts (SI_ORDER_INTR) */

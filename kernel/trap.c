@@ -11,6 +11,7 @@
  * never the kernel.
  */
 #include <magia/abi.h>
+#include <magia/apic.h>
 #include <magia/cpu.h>
 #include <magia/rust.h>
 #include <magia/thread.h>
@@ -30,6 +31,7 @@ struct __packed idt_gate {
 static struct idt_gate idt[256] __aligned(16);
 static irq_handler_t irq_handlers[16];
 volatile uint64_t irq_counts[16];
+volatile uint64_t vec_counts[2]; /* LAPIC timer, LAPIC error */
 volatile uint64_t breakpoint_hits;
 volatile uint64_t user_faults;
 extern const uint64_t isr_table[];
@@ -62,7 +64,9 @@ void idt_init(void)
 {
 	for (int i = 0; i < 48; i++)
 		set_gate(i, isr_table[i], i == 8 ? 1 : i == 2 ? 2 : 0);
-	set_gate(255, isr_table[48], 0);
+	set_gate(VEC_LAPIC_TIMER, isr_table[48], 0);
+	set_gate(VEC_LAPIC_ERROR, isr_table[49], 0);
+	set_gate(VEC_SPURIOUS, isr_table[50], 0);
 	struct __packed {
 		uint16_t limit;
 		uint64_t base;
@@ -72,7 +76,17 @@ void idt_init(void)
 
 void irq_register(int irq, irq_handler_t h) { irq_handlers[irq] = h; }
 
-void irq_enable(int irq) { pic_unmask(irq); }
+/* Handlers for LAPIC vectors outside the ISA range (timer, error). */
+static irq_handler_t vec_handlers[256];
+void irq_register_vector(int vec, irq_handler_t h) { vec_handlers[vec] = h; }
+
+void irq_enable(int irq)
+{
+	if (apic_mode)
+		ioapic_route_isa(irq);
+	else
+		pic_unmask(irq);
+}
 
 void trap_dump(const struct trapframe *tf)
 {
@@ -109,17 +123,28 @@ void trap_dispatch(struct trapframe *tf)
 
 	if (v >= IRQ_BASE && v < IRQ_BASE + 16) {
 		int irq = (int)(v - IRQ_BASE);
-		if ((irq == 7 || irq == 15) && pic_spurious(irq))
+		if (!apic_mode && (irq == 7 || irq == 15) && pic_spurious(irq))
 			return;
 		irq_counts[irq]++;
 		if (irq_handlers[irq])
 			irq_handlers[irq](tf);
-		pic_eoi(irq);
+		if (apic_mode)
+			lapic_eoi();
+		else
+			pic_eoi(irq);
 		preempt_check();
 		return;
 	}
-	if (v == 255)
+	if (v == VEC_LAPIC_TIMER || v == VEC_LAPIC_ERROR) {
+		vec_counts[v == VEC_LAPIC_TIMER ? 0 : 1]++;
+		if (vec_handlers[v])
+			vec_handlers[v](tf);
+		lapic_eoi();
+		preempt_check();
 		return;
+	}
+	if (v == VEC_SPURIOUS)
+		return; /* spurious LAPIC interrupt: no EOI */
 
 	if (tf->cs & 3) {
 		user_fault(tf);
