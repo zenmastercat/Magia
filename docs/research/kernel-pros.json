@@ -1,0 +1,2381 @@
+{
+ "title": "Magia kernel design: what FreeBSD and Linux each do best",
+ "prepared_by": "Research Desk",
+ "prepared_for": "Mr.Main",
+ "date": "2026-11-20",
+ "scope": "x86_64 kernel only, written from scratch; FreeBSD 15.1 / freebsd-src main vs Linux 7.4.0-rc3 docs / torvalds/linux master",
+ "labels": {
+  "Verified": "stated in a primary source that was opened",
+  "Reported": "author/vendor measurement or report of statements",
+  "Inference": "Research Desk reasoning",
+  "Unknown": "not found"
+ },
+ "answer": "Where Magia's plan has already decided, it takes the better-supported side: Capsicum, jails, kqueue, a typed sysctl tree and a master syscall table from FreeBSD; EEVDF and ring-based I/O from Linux. For parts not yet planned, the evidence favours blk-mq queues with GEOM-style layering, RCU path lookup, folio-style page units, VNET with one filter VM, DTrace-style static probes and the Linux/KSPP hardening baseline. Three changes to the existing plan are supported: narrow and gate the io_uring-style rings, keep resource accounting in one cgroup-v2-style hierarchy, and add the Linux hardening the plan lacks (strong stack protector, zero-initialised stacks, kCFI/IBT, later KASLR). Confidence: medium-high for the facts (primary sources, dated); the picks themselves are inference.",
+ "rows": [
+  {
+   "n": 1,
+   "id": "sandbox",
+   "subsystem": "Process sandboxing: Capsicum vs seccomp-bpf / Landlock",
+   "freebsd": {
+    "design": "Capsicum (since 9.0): cap_enter(2) puts a process in capability mode, which cuts access to global namespaces (file-system paths, PIDs); each file descriptor carries rights limited with cap_rights_limit(2); process descriptors replace PIDs. Capability mode cannot be left and is inherited by children.",
+    "strengths": [
+     "One deny-by-default model: rights travel with descriptors",
+     "Very little code to adopt (about 100 lines for Chromium in 2010)",
+     "Measured cost small: capability-aware syscalls a few percent slower (2010)"
+    ],
+    "weaknesses": [
+     "Programs must open what they need before entering capability mode (Inference)",
+     "The Linux port proposed in 2014 is not in mainline, so there is no cross-platform reuse (Inference)"
+    ]
+   },
+   "linux": {
+    "design": "seccomp-bpf (filter mode since 3.5; seccomp() syscall since 3.17) runs a BPF filter on each syscall number and its register arguments. Landlock (since 5.13) lets an unprivileged process stack rulesets that restrict file-system access, TCP/UDP ports and some IPC scopes, with a versioned ABI.",
+    "strengths": [
+     "seccomp filters apply to unmodified programs",
+     "Landlock is unprivileged and stackable; its ABI grows by numbered versions"
+    ],
+    "weaknesses": [
+     "seccomp filters cannot dereference pointers, so they cannot check paths; the kernel docs say filtering 'isn't a sandbox'",
+     "Three overlapping mechanisms (seccomp, Landlock, LSMs) (Inference)"
+    ]
+   },
+   "magia_pick": {
+    "text": "Capsicum as the core sandbox: capability mode plus per-descriptor rights plus process descriptors. Mark each syscall as allowed or not in capability mode in the master syscall table, as FreeBSD's syscalls.master does with CAPENABLED. Borrow Landlock's numbered-ABI idea for adding new rights later. Leave seccomp-style filters out until Magia has a userland.",
+    "label": "Inference",
+    "why": "Magia has no legacy programs to keep working, which removes Capsicum's main cost (retrofitting). The model is simpler to reason about than a syscall filter and was cheap in the only measurement found.",
+    "fit_with_plan": "Matches the plan (Rust 'Capsicum rights', FreeBSD errno ENOTCAPABLE/ECAPMODE).",
+    "confidence": "high"
+   },
+   "claims": [
+    {
+     "text": "Capability mode removes access to global namespaces; rights are limited per descriptor; process descriptors exist; first appeared in FreeBSD 9.0.",
+     "label": "Verified",
+     "sources": [
+      "S1"
+     ]
+    },
+    {
+     "text": "In capability mode only about 60 of over 15,000 sysctl parameters stay reachable.",
+     "label": "Verified",
+     "sources": [
+      "S1"
+     ]
+    },
+    {
+     "text": "Capability mode cannot be cleared and is inherited by fork/pdfork children.",
+     "label": "Verified",
+     "sources": [
+      "S2"
+     ]
+    },
+    {
+     "text": "2010 measurements: Chromium sandbox about 100 lines with Capsicum vs 11,301 with Linux seccomp (strict mode) plus userspace wrapper, 22,350 with Windows ACLs; cap_new 50.7% slower than dup; capability-aware syscalls 'just a few percent slower'.",
+     "label": "Verified",
+     "sources": [
+      "S3"
+     ]
+    },
+    {
+     "text": "seccomp BPF filters may not dereference pointers; the docs say 'System call filtering isn't a sandbox' but a way to minimise exposed kernel surface.",
+     "label": "Verified",
+     "sources": [
+      "S4"
+     ]
+    },
+    {
+     "text": "seccomp filter mode on x86-64 since Linux 3.5; seccomp() syscall since 3.17.",
+     "label": "Verified",
+     "sources": [
+      "S5"
+     ]
+    },
+    {
+     "text": "Landlock: unprivileged, first introduced in Linux 5.13; restricts file system, TCP/UDP ports and scopes; at most 16 stacked rulesets; ABI versions 1-12 listed in the 7.4-rc3 docs.",
+     "label": "Verified",
+     "sources": [
+      "S6"
+     ]
+    },
+    {
+     "text": "Capsicum-for-Linux patches (Google, 2014) were described as 'a hard sell' and are not in mainline.",
+     "label": "Inference",
+     "sources": [
+      "S7",
+      "S6"
+     ]
+    },
+    {
+     "text": "FreeBSD main flags 300 of 560 numbered syscall-table lines CAPENABLED (my count, 2026-11-19).",
+     "label": "Verified",
+     "sources": [
+      "S82"
+     ]
+    }
+   ],
+   "sources": [
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S7",
+    "S82"
+   ]
+  },
+  {
+   "n": 2,
+   "id": "containers",
+   "subsystem": "Containers: jails vs namespaces + cgroups v2",
+   "freebsd": {
+    "design": "Jails (since 4.0): one kernel object per container with named parameters; hierarchical jails since 8.0; VNET jails get their own network stack. Resource limits via rctl(8) (since 9.0). The Handbook now also covers OCI containers with Podman.",
+    "strengths": [
+     "One first-class object is easy to audit and name (Inference)",
+     "VNET gives each jail a full network stack"
+    ],
+    "weaknesses": [
+     "rctl write-bandwidth/IOPS limits are counted at the file-system cache, not the device"
+    ]
+   },
+   "linux": {
+    "design": "Eight namespace types (cgroup, ipc, network, mount, pid, time, user, uts) combined per process; unprivileged user namespaces since 3.8. Resource control via cgroup v2, a single unified hierarchy.",
+    "strengths": [
+     "Namespaces compose freely; cgroup v2's single tree replaced v1's multiple hierarchies, which 'wasn't useful in practice'"
+    ],
+    "weaknesses": [
+     "Unprivileged user namespaces became a step in several privilege-escalation chains; Ubuntu 23.10 restricted them",
+     "A 'container' is a userland convention over many kernel pieces (Inference)"
+    ]
+   },
+   "magia_pick": {
+    "text": "A jail-like container object with VNET-style per-jail network stacks, plus one cgroup-v2-style hierarchy for resource accounting (controllers enabled per subtree). Do not add unprivileged user namespaces.",
+    "label": "Inference",
+    "why": "The jail object keeps isolation in one place; cgroup v2 is the better-documented accounting model; the user-namespace record argues against unprivileged nesting.",
+    "fit_with_plan": "Matches the plan ('jails + resource accounting'); suggests making the accounting hierarchical.",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "jail(8) appeared in FreeBSD 4.0; hierarchical jails in 8.0; jail.conf in 9.1; parameters include vnet and children.max.",
+     "label": "Verified",
+     "sources": [
+      "S8"
+     ]
+    },
+    {
+     "text": "The Handbook covers VNET jails and has a chapter on OCI containers including Podman.",
+     "label": "Verified",
+     "sources": [
+      "S9"
+     ]
+    },
+    {
+     "text": "rctl(8) appeared in FreeBSD 9.0; writebps/writeiops are accounted to the file-system cache, not devices.",
+     "label": "Verified",
+     "sources": [
+      "S10"
+     ]
+    },
+    {
+     "text": "Linux has 8 namespace types; time namespaces since 5.6, cgroup namespaces since 4.6.",
+     "label": "Verified",
+     "sources": [
+      "S11"
+     ]
+    },
+    {
+     "text": "Unprivileged user namespaces since Linux 3.8.",
+     "label": "Verified",
+     "sources": [
+      "S11",
+      "S12"
+     ]
+    },
+    {
+     "text": "cgroup v2 uses one unified hierarchy; v1's multiple hierarchies 'wasn't useful in practice'; no-internal-process rule; threaded mode.",
+     "label": "Verified",
+     "sources": [
+      "S13"
+     ]
+    },
+    {
+     "text": "Ubuntu (2023-10-09): unprivileged user namespaces are 'broadly used as a step in several privilege escalation exploit chains'; 23.10 restricts them.",
+     "label": "Verified",
+     "sources": [
+      "S14"
+     ]
+    }
+   ],
+   "sources": [
+    "S8",
+    "S9",
+    "S10",
+    "S11",
+    "S12",
+    "S13",
+    "S14"
+   ]
+  },
+  {
+   "n": 3,
+   "id": "events",
+   "subsystem": "Event notification: kqueue vs epoll (and io_uring)",
+   "freebsd": {
+    "design": "kqueue/kevent (since 4.1): one call submits changes and collects events; filters cover READ, WRITE, AIO, VNODE, PROC, PROCDESC, SIGNAL, TIMER, USER, EMPTY, JAIL and JAILDESC.",
+    "strengths": [
+     "Generic: one queue for fds, files, processes, signals, timers, user events and AIO completion",
+     "Kernel keeps the state, so cost does not grow with the number of watched objects per call (2001 design)"
+    ],
+    "weaknesses": [
+     "No source found on kqueue weaknesses at scale (Unknown)"
+    ]
+   },
+   "linux": {
+    "design": "epoll: an interest list of file descriptors, edge- or level-triggered, scales to large numbers of descriptors. Non-fd events need fd wrappers (Inference: not checked here).",
+    "strengths": [
+     "Well-known scaling for large fd sets"
+    ],
+    "weaknesses": [
+     "Interest is tied to the open file description: a closed fd that was dup'd keeps reporting events until all duplicates are closed"
+    ]
+   },
+   "magia_pick": {
+    "text": "kqueue as Magia's single event queue, including a jail filter (FreeBSD 15.1's kqueue has JAIL and JAILDESC filters) and AIO/ring completions.",
+    "label": "Inference",
+    "why": "One generic queue with typed filters is easier to secure and document than per-type descriptor wrappers.",
+    "fit_with_plan": "Matches the plan (kqueue in the Rust crate).",
+    "confidence": "high"
+   },
+   "claims": [
+    {
+     "text": "kqueue filters include READ, WRITE, AIO, VNODE, PROC, PROCDESC, SIGNAL, TIMER, USER, EMPTY, JAIL, JAILDESC; kqueue/kevent since FreeBSD 4.1; kqueuex() since 14.0.",
+     "label": "Verified",
+     "sources": [
+      "S15"
+     ]
+    },
+    {
+     "text": "poll/select are stateless and O(N) per call; kqueue keeps state in the kernel and is generic beyond sockets and pipes.",
+     "label": "Verified",
+     "sources": [
+      "S16"
+     ]
+    },
+    {
+     "text": "epoll scales to large numbers of fds; a closed fd that was duplicated keeps reporting events until all duplicates are closed.",
+     "label": "Verified",
+     "sources": [
+      "S17"
+     ]
+    }
+   ],
+   "sources": [
+    "S15",
+    "S16",
+    "S17"
+   ]
+  },
+  {
+   "n": 4,
+   "id": "aio",
+   "subsystem": "Asynchronous I/O: io_uring vs FreeBSD aio",
+   "freebsd": {
+    "design": "POSIX aio. Sockets, raw disks and local regular files are always truly asynchronous ('safe'); other file types are 'unsafe' and off by default (vfs.aio.enable_unsafe). Completions can be delivered through kqueue (EVFILT_AIO). aio_readv since 13.0, aio_read2 since 14.1.",
+    "strengths": [
+     "Small, POSIX-defined surface; integrates with kqueue"
+    ],
+    "weaknesses": [
+     "Only some file types are truly async by default"
+    ]
+   },
+   "linux": {
+    "design": "io_uring: submission and completion rings shared between user space and kernel, so many requests need no syscall each. A sysctl (kernel.io_uring_disabled, 0/1/2) can restrict or disable it.",
+    "strengths": [
+     "Author's 2019 benchmark: 1.7M 4 KiB IOPS polled vs 608K with Linux native aio; about 1.2M non-polled"
+    ],
+    "weaknesses": [
+     "Google (2023): 60% of kCTF VRP exploit submissions in the prior year used io_uring; disabled on ChromeOS and production Google servers, blocked for Android apps"
+    ]
+   },
+   "magia_pick": {
+    "text": "Keep the ring design for speed, but narrow it: a small fixed opcode set that reuses the normal syscall handlers and Capsicum rights checks, a sysctl kill switch like io_uring_disabled, and completions that can also be posted to kqueue.",
+    "label": "Inference",
+    "why": "Rings win on throughput, but io_uring's breadth made it the top exploit target in Google's programme; a narrow, rights-checked ring keeps most of the gain with less new surface (Inference).",
+    "fit_with_plan": "Plan has 'io_uring-style rings'; add the opcode allowlist and kill switch.",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "io_uring: 1.7M 4K IOPS polled vs 608K for Linux aio; non-polled about 1.2M (author's own benchmark, 2019).",
+     "label": "Reported",
+     "sources": [
+      "S18"
+     ]
+    },
+    {
+     "text": "60% of kCTF VRP submissions exploited io_uring; it is disabled on ChromeOS, unreachable to Android apps via seccomp-bpf and disabled on production Google servers (2023-06-14).",
+     "label": "Verified",
+     "sources": [
+      "S22"
+     ]
+    },
+    {
+     "text": "kernel.io_uring_disabled (0/1/2) with io_uring_group; 'Enabling this shrinks the kernel's attack surface.'",
+     "label": "Verified",
+     "sources": [
+      "S23"
+     ]
+    },
+    {
+     "text": "FreeBSD aio: sockets, raw disks, local regular files always async; other types unsafe and off by default; aio in all kernels since 11.0.",
+     "label": "Verified",
+     "sources": [
+      "S20"
+     ]
+    },
+    {
+     "text": "aio_readv since FreeBSD 13.0, aio_read2 since 14.1; AIO completion via EVFILT_AIO.",
+     "label": "Verified",
+     "sources": [
+      "S21",
+      "S15"
+     ]
+    }
+   ],
+   "sources": [
+    "S18",
+    "S22",
+    "S23",
+    "S20",
+    "S21",
+    "S15"
+   ]
+  },
+  {
+   "n": 5,
+   "id": "scheduler",
+   "subsystem": "CPU scheduler: ULE vs CFS -> EEVDF, plus sched_ext",
+   "freebsd": {
+    "design": "ULE (since 5.1): per-CPU run queues, CPU affinity, topology and hyper-threading awareness, interactivity heuristics. FreeBSD 15 builds ULE and 4BSD together and picks one at boot (ULE default).",
+    "strengths": [
+     "Per-CPU queues and locks from the start (2003 design)",
+     "Better long-run load balance than CFS in the 2018 study"
+    ],
+    "weaknesses": [
+     "ULE 'may cause starvation', even with identical threads (2018 study)"
+    ]
+   },
+   "linux": {
+    "design": "EEVDF replaced CFS in 6.6 (2023-10-29): each task has lag and a virtual deadline; tasks may request a time slice via sched_setattr(). sched_ext (from 6.12, 2024-11-17) lets BPF programs implement a scheduler class that can be switched at runtime, with automatic fallback.",
+    "strengths": [
+     "Deadlines give a defined latency knob per task",
+     "sched_ext allows experiments without risking the system: default restored on error, stall or SysRq-S"
+    ],
+    "weaknesses": [
+     "2018 study: no overall winner over ULE; CFS-era data only (no ULE vs EEVDF study found)"
+    ]
+   },
+   "magia_pick": {
+    "text": "EEVDF as the default policy, per-CPU run queues when Magia goes SMP, and a scheduler-class interface so a second policy can be chosen at boot (FreeBSD 15 style) and, later, loaded with a safety fallback (sched_ext idea).",
+    "label": "Inference",
+    "why": "Measured evidence shows no overall winner, so pick the design with the clearest fairness and latency definition and keep it swappable.",
+    "fit_with_plan": "Matches the plan (EEVDF in Rust; nice-to-weight table recomputed from its formula).",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "ULE: per-CPU run queues, affinity, topology aware, interactivity heuristics; first appeared in FreeBSD 5.1.",
+     "label": "Verified",
+     "sources": [
+      "S24",
+      "S25"
+     ]
+    },
+    {
+     "text": "2018 study with ULE ported into Linux: 'There is no overall winner'; ULE 'may cause starvation'; CFS balances load faster, ULE achieves better long-run balance.",
+     "label": "Verified",
+     "sources": [
+      "S26"
+     ]
+    },
+    {
+     "text": "Linux began moving to EEVDF in 6.6; lag and virtual deadline; slices requestable via sched_setattr().",
+     "label": "Verified",
+     "sources": [
+      "S27",
+      "S29"
+     ]
+    },
+    {
+     "text": "Linux 6.6 released 2023-10-29 replacing CFS with EEVDF.",
+     "label": "Verified",
+     "sources": [
+      "S30"
+     ]
+    },
+    {
+     "text": "sched_ext: BPF-defined scheduler class, switchable at runtime; system integrity kept whatever the BPF scheduler does; first pieces in 6.12 (2024-11-17).",
+     "label": "Verified",
+     "sources": [
+      "S28",
+      "S31"
+     ]
+    },
+    {
+     "text": "FreeBSD 15: ULE and 4BSD compiled together, selected at boot (kern.sched.name), ULE default; GENERIC amd64 gets both (commit 2026-02-11).",
+     "label": "Verified",
+     "sources": [
+      "S33",
+      "S34"
+     ]
+    },
+    {
+     "text": "No published comparison of ULE with EEVDF was found.",
+     "label": "Unknown",
+     "sources": []
+    }
+   ],
+   "sources": [
+    "S24",
+    "S25",
+    "S26",
+    "S27",
+    "S29",
+    "S30",
+    "S28",
+    "S31",
+    "S33",
+    "S34"
+   ]
+  },
+  {
+   "n": 6,
+   "id": "tunables",
+   "subsystem": "Kernel tunables: sysctl MIB tree vs /proc/sys + sysfs",
+   "freebsd": {
+    "design": "One sysctl MIB tree: numeric OIDs also addressable by name, typed values (integers, strings, tables), kernel-side registration with a description string per node, and per-node flags (e.g. which nodes are reachable in capability mode).",
+    "strengths": [
+     "Typed, self-describing, one namespace",
+     "Per-node policy flags (capability mode allows about 60 of over 15,000 nodes)"
+    ],
+    "weaknesses": [
+     "No per-node stability level documented like Linux's ABI files (Inference)"
+    ]
+   },
+   "linux": {
+    "design": "/proc/sys text files for tunables and sysfs for device/kernel objects ('one value per file', ASCII). The binary sysctl(2) syscall was removed in 5.5. Stability is documented per file in Documentation/ABI (stable, testing, obsolete, removed).",
+    "strengths": [
+     "Plain files work with any tool; ABI stability levels are written down"
+    ],
+    "weaknesses": [
+     "Untyped text; two separate trees; binary interface removed"
+    ]
+   },
+   "magia_pick": {
+    "text": "FreeBSD-style typed MIB with descriptions and per-node flags (read-only, boot tunable, capability-mode allowed), registered through linker sets; add a Linux-style stability level per node (stable/testing/obsolete).",
+    "label": "Inference",
+    "why": "Typed nodes with flags serve both the sandbox and documentation; Linux's stability levels make the promise explicit.",
+    "fit_with_plan": "Matches the plan (sysctl MIB tree in Rust, linker sets).",
+    "confidence": "high"
+   },
+   "claims": [
+    {
+     "text": "sysctl MIB is an array of integers, also accessible by name (sysctlbyname); typed values.",
+     "label": "Verified",
+     "sources": [
+      "S35"
+     ]
+    },
+    {
+     "text": "Kernel nodes are added with SYSCTL_ADD_* macros that take a description string.",
+     "label": "Verified",
+     "sources": [
+      "S36"
+     ]
+    },
+    {
+     "text": "About 60 of over 15,000 sysctl parameters are allowed in capability mode.",
+     "label": "Verified",
+     "sources": [
+      "S1"
+     ]
+    },
+    {
+     "text": "sysfs attributes should be ASCII text files, preferably one value per file.",
+     "label": "Verified",
+     "sources": [
+      "S37"
+     ]
+    },
+    {
+     "text": "The binary sysctl(2) syscall was removed in Linux 5.5; use /proc/sys instead.",
+     "label": "Verified",
+     "sources": [
+      "S38"
+     ]
+    },
+    {
+     "text": "Documentation/ABI levels: stable (at least 2 years; syscalls expected never to change), testing, obsolete, removed.",
+     "label": "Verified",
+     "sources": [
+      "S39"
+     ]
+    }
+   ],
+   "sources": [
+    "S35",
+    "S36",
+    "S1",
+    "S37",
+    "S38",
+    "S39"
+   ]
+  },
+  {
+   "n": 7,
+   "id": "storage",
+   "subsystem": "Storage layering: GEOM vs device-mapper / block layer",
+   "freebsd": {
+    "design": "GEOM: a modular framework of classes, geoms, providers and consumers that transform disk I/O requests; classes can stack in any order (only cycles are forbidden). Classes include ELI (encryption), MIRROR, RAID, PART_*, UZIP and GATE.",
+    "strengths": [
+     "One uniform graph for every transformation; topology-agnostic and extensible"
+    ],
+    "weaknesses": [
+     "No current scaling measurement of GEOM found (Unknown)"
+    ]
+   },
+   "linux": {
+    "design": "device-mapper targets (crypt, integrity, verity, thin, cache, raid, zoned, vdo, snapshot, linear, stripe, ...) on top of blk-mq, the multi-queue block layer with per-CPU software queues mapped to hardware queues.",
+    "strengths": [
+     "blk-mq removed the single request-queue lock bottleneck and scaled to about 10 million IOPS (2013)",
+     "Broad set of production targets"
+    ],
+    "weaknesses": [
+     "No weakness documented in the sources read (Unknown)"
+    ]
+   },
+   "magia_pick": {
+    "text": "A blk-mq-style per-CPU multi-queue core for submission, with GEOM-style providers and consumers for every transform (partitions, encryption, mirroring).",
+    "label": "Inference",
+    "why": "blk-mq has the measured scaling; GEOM has the cleaner composition model; they sit at different layers, so both fit.",
+    "fit_with_plan": "Not yet in the plan (no block layer yet).",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "GEOM is a 'modular disk I/O request transformation framework'; classes stack in any order, only cycles are disallowed; many classes (ELI, MIRROR, RAID, PART_*, UZIP, GATE).",
+     "label": "Verified",
+     "sources": [
+      "S40"
+     ]
+    },
+    {
+     "text": "device-mapper targets include crypt, integrity, verity, thin, cache, raid, zoned, vdo, snapshot, linear, stripe.",
+     "label": "Verified",
+     "sources": [
+      "S41"
+     ]
+    },
+    {
+     "text": "2013 measurements: the single-queue block layer lock was the bottleneck; blk-mq scaled to 10 million IOPS.",
+     "label": "Verified",
+     "sources": [
+      "S43",
+      "S42"
+     ]
+    }
+   ],
+   "sources": [
+    "S40",
+    "S41",
+    "S43",
+    "S42"
+   ]
+  },
+  {
+   "n": 8,
+   "id": "filesystem",
+   "subsystem": "File systems and VFS: ZFS/UFS vs ext4/btrfs",
+   "freebsd": {
+    "design": "ZFS (OpenZFS): checksums on all data with self-repair from redundancy, pooled storage, ARC/L2ARC/ZIL. UFS with soft-updates journaling. VFS built on vnodes with use, hold and write counts; vnodes are recycled across file systems.",
+    "strengths": [
+     "ZFS end-to-end checksums and self-healing in base"
+    ],
+    "weaknesses": [
+     "ZFS is CDDL: FreeBSD allows it only in modules, not the static kernel"
+    ]
+   },
+   "linux": {
+    "design": "ext4 (mature default) and btrfs (RAID5/6 still 'unstable'). ZFS is not in mainline. VFS with a dentry cache and RCU-walk lockless path lookup, falling back to REF-walk.",
+    "strengths": [
+     "RCU-walk path lookup avoids locks on the common path"
+    ],
+    "weaknesses": [
+     "btrfs RAID56 unstable (status page, 2026-10-16)",
+     "ZFS stays out of mainline over licensing (Torvalds, 2020)"
+    ]
+   },
+   "magia_pick": {
+    "text": "Linux-style dentry cache with RCU-walk path lookup once Magia is SMP; when a disk file system is added, design it around ZFS-style checksums on every block, verified on read and repaired from redundancy. Keep ramfs/devfs for now.",
+    "label": "Inference",
+    "why": "Path lookup is the hottest VFS path and RCU-walk is documented in depth; end-to-end checksums are the main correctness gain ZFS shows.",
+    "fit_with_plan": "Plan has VFS + ramfs + devfs + pipes; no disk file system yet.",
+    "confidence": "medium-low"
+   },
+   "claims": [
+    {
+     "text": "ZFS checksums all data and self-repairs from redundancy; pooled storage; ARC, L2ARC, ZIL; development moved to OpenZFS.",
+     "label": "Verified",
+     "sources": [
+      "S44"
+     ]
+    },
+    {
+     "text": "UFS soft updates journaling (tunefs -j) reduces fsck time.",
+     "label": "Verified",
+     "sources": [
+      "S45"
+     ]
+    },
+    {
+     "text": "btrfs RAID56 is marked 'unstable'.",
+     "label": "Verified",
+     "sources": [
+      "S47"
+     ]
+    },
+    {
+     "text": "Torvalds (2020-01-06): he cannot merge ZFS without Oracle's legal sign-off and advises 'Don't use ZFS.' (his opinion, not a ruling).",
+     "label": "Reported",
+     "sources": [
+      "S51"
+     ]
+    },
+    {
+     "text": "CDDL is approved in FreeBSD for DTrace and ZFS; GPL/CDDL code must not be compiled into the static GENERIC kernel.",
+     "label": "Verified",
+     "sources": [
+      "S81"
+     ]
+    },
+    {
+     "text": "Linux VFS uses a dentry cache; RCU-walk lockless lookup with REF-walk fallback.",
+     "label": "Verified",
+     "sources": [
+      "S48",
+      "S49"
+     ]
+    },
+    {
+     "text": "FreeBSD vnodes carry usecount, holdcnt and writecount and are recycled across file systems.",
+     "label": "Verified",
+     "sources": [
+      "S50"
+     ]
+    },
+    {
+     "text": "ext4 documentation and options (mature in-tree file system).",
+     "label": "Verified",
+     "sources": [
+      "S46"
+     ]
+    },
+    {
+     "text": "FreeBSD's own lockless path-lookup work was not checked.",
+     "label": "Unknown",
+     "sources": []
+    }
+   ],
+   "sources": [
+    "S44",
+    "S45",
+    "S47",
+    "S51",
+    "S81",
+    "S48",
+    "S49",
+    "S50",
+    "S46"
+   ]
+  },
+  {
+   "n": 9,
+   "id": "memory",
+   "subsystem": "Memory management: FreeBSD VM/UMA vs Linux SLUB/folios/MGLRU",
+   "freebsd": {
+    "design": "VM objects with shadow objects for copy-on-write, unified with the buffer cache. UMA zone allocator with per-CPU caches and NUMA policies. Reservation-based transparent superpages (since 7.2 on amd64/i386), enabled by default in the current amd64 pmap.",
+    "strengths": [
+     "Superpages without a background collapse daemon: reservations promote pages in place (Inference from the design)",
+     "Reservation superpages gave gains 'often exceeding 30%' (2002)"
+    ],
+    "weaknesses": [
+     "VM complexity is driven by performance (Dillon)"
+    ]
+   },
+   "linux": {
+    "design": "SLUB is the slab allocator (SLAB was removed in 6.8). Folios: a type for a page that is never a tail page, used to handle multi-page units cleanly. MGLRU: generation-based page reclaim. Transparent huge pages with always/madvise modes, khugepaged and multi-size THP.",
+    "strengths": [
+     "MGLRU at Google: 40% less kswapd CPU, 85% fewer low-memory kills (p75), 18% better app launch",
+     "Folios: clearer types; 7% faster kernel builds reported from related page-cache work"
+    ],
+    "weaknesses": [
+     "Folio conversion is a multi-year retrofit (Inference)"
+    ]
+   },
+   "magia_pick": {
+    "text": "Keep the plan's buddy allocator, struct page array and slab zones; give zones per-CPU caches (UMA/SLUB style) when SMP arrives; use a folio-like multi-page type in the page cache from day one; FreeBSD-style reservation superpages for anonymous memory; generation-based (MGLRU-like) reclaim later.",
+    "label": "Inference",
+    "why": "Folio-style typing is cheap in a new kernel and expensive to retrofit; reservations get superpages without a scanning daemon; MGLRU has the best measured reclaim data.",
+    "fit_with_plan": "Plan has buddy + struct page + slab zones and a single address space for now.",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "FreeBSD VM: vm_object layering with shadow objects for copy-on-write, unified with the buffer cache.",
+     "label": "Verified",
+     "sources": [
+      "S52"
+     ]
+    },
+    {
+     "text": "UMA zones: per-CPU caches 'with linear scalability on SMP', NUMA policies, slabs via kegs.",
+     "label": "Verified",
+     "sources": [
+      "S53"
+     ]
+    },
+    {
+     "text": "Reservation-based superpages: benefits 'often exceeding 30%' (OSDI 2002, FreeBSD/Alpha).",
+     "label": "Verified",
+     "sources": [
+      "S54"
+     ]
+    },
+    {
+     "text": "FreeBSD 7.2 (2009) added transparent superpages for amd64/i386 application memory.",
+     "label": "Verified",
+     "sources": [
+      "S55"
+     ]
+    },
+    {
+     "text": "Current amd64 pmap sets pg_ps_enabled = 1.",
+     "label": "Verified",
+     "sources": [
+      "S56"
+     ]
+    },
+    {
+     "text": "SLAB allocator removed in Linux 6.8 (2024-03-10).",
+     "label": "Verified",
+     "sources": [
+      "S32"
+     ]
+    },
+    {
+     "text": "MGLRU: 40% less kswapd CPU, 85% fewer low-memory kills at p75, 18% app-launch improvement; rolled out to tens of millions of ChromeOS users (Google's numbers).",
+     "label": "Reported",
+     "sources": [
+      "S58",
+      "S57"
+     ]
+    },
+    {
+     "text": "A folio is a page guaranteed not to be a tail page; a commenter (M. Wilcox) reported 7% faster kernel compiles from earlier THP page-cache work.",
+     "label": "Reported",
+     "sources": [
+      "S59"
+     ]
+    },
+    {
+     "text": "Linux THP supports always/madvise/never, khugepaged and multi-size THP (mTHP).",
+     "label": "Verified",
+     "sources": [
+      "S109"
+     ]
+    }
+   ],
+   "sources": [
+    "S52",
+    "S53",
+    "S54",
+    "S55",
+    "S56",
+    "S32",
+    "S58",
+    "S57",
+    "S59",
+    "S109"
+   ]
+  },
+  {
+   "n": 10,
+   "id": "networking",
+   "subsystem": "Networking: netgraph, VNET, pf vs nftables, XDP/eBPF",
+   "freebsd": {
+    "design": "netgraph: graphs of nodes and hooks that supplement the stack. VNET: several isolated network stacks in one kernel, attached to jails. pf (from OpenBSD 4.5, reworked for multi-CPU) alongside IPFW and IPFILTER. netmap fast packet I/O in base.",
+    "strengths": [
+     "VNET makes per-container stacks a kernel feature (2003 design)",
+     "netmap: 14.88 Mpps on one 900 MHz core (2012)"
+    ],
+    "weaknesses": [
+     "Three firewalls in base, each with its own syntax"
+    ]
+   },
+   "linux": {
+    "design": "nftables: an in-kernel virtual machine for rules, with sets, maps and incremental updates, replacing protocol-specific iptables code. XDP: eBPF programs at the driver hook, checked by the eBPF verifier.",
+    "strengths": [
+     "XDP up to 24 Mpps per core while keeping the kernel's security boundary (2018)",
+     "nftables: new protocols often need no new kernel code"
+    ],
+    "weaknesses": [
+     "XDP peak below DPDK (2018)",
+     "Unprivileged BPF can be switched off, and a build option makes that the default"
+    ]
+   },
+   "magia_pick": {
+    "text": "VNET-style stack instances from the start (one per jail); one packet filter built on a small rule VM with sets and maps (nftables idea) instead of several firewalls; an XDP-like early hook later that shares the verifier with tracing.",
+    "label": "Inference",
+    "why": "Per-jail stacks fit the container model; one VM plus one verifier is less code than several filter engines (Inference).",
+    "fit_with_plan": "Not yet in the plan (no network stack yet).",
+    "confidence": "medium-low"
+   },
+   "claims": [
+    {
+     "text": "netgraph: nodes and hooks in arbitrary graphs that 'supplement rather than replace' the stack; origin Whistle Communications.",
+     "label": "Verified",
+     "sources": [
+      "S60"
+     ]
+    },
+    {
+     "text": "Clonable network stack: multiple independent stacks in one kernel (2003); jails take a vnet parameter.",
+     "label": "Verified",
+     "sources": [
+      "S61",
+      "S8"
+     ]
+    },
+    {
+     "text": "FreeBSD pf derives from OpenBSD 4.5, 'heavily modified' for multi-CPU; base ships PF, IPFW and IPFILTER.",
+     "label": "Verified",
+     "sources": [
+      "S62",
+      "S63"
+     ]
+    },
+    {
+     "text": "nftables: in-kernel VM, a new protocol 'will often not require a new kernel'; incremental rule updates; sets, maps, concatenations.",
+     "label": "Verified",
+     "sources": [
+      "S64",
+      "S65"
+     ]
+    },
+    {
+     "text": "XDP: up to 24 Mpps per core, below DPDK peak, keeps the kernel security boundary (2018).",
+     "label": "Verified",
+     "sources": [
+      "S66"
+     ]
+    },
+    {
+     "text": "netmap: 14.88 Mpps on a 900 MHz core, 20x faster than conventional APIs (2012); in FreeBSD base and also on Linux.",
+     "label": "Verified",
+     "sources": [
+      "S67",
+      "S68"
+     ]
+    },
+    {
+     "text": "eBPF verifier: rejects unbounded loops via DAG check, simulates paths, prevents kernel-address leaks to unprivileged users.",
+     "label": "Verified",
+     "sources": [
+      "S69"
+     ]
+    },
+    {
+     "text": "unprivileged_bpf_disabled; BPF_UNPRIV_DEFAULT_OFF makes the default 2 (disabled).",
+     "label": "Verified",
+     "sources": [
+      "S23"
+     ]
+    }
+   ],
+   "sources": [
+    "S60",
+    "S61",
+    "S8",
+    "S62",
+    "S63",
+    "S64",
+    "S65",
+    "S66",
+    "S67",
+    "S68",
+    "S69",
+    "S23"
+   ]
+  },
+  {
+   "n": 11,
+   "id": "tracing",
+   "subsystem": "Tracing: DTrace vs eBPF / ftrace",
+   "freebsd": {
+    "design": "DTrace: providers expose probes that cost nothing when disabled; D scripts run with safety guarantees. FreeBSD has full kernel DTrace (userland is experimental) and, since 14.0, kinst (probe any instruction in a kernel function).",
+    "strengths": [
+     "'Zero probe effect' when disabled and a safety-first design (2004)",
+     "A mature language (D) and probe naming"
+    ],
+    "weaknesses": [
+     "Userland DTrace on FreeBSD is experimental"
+    ]
+   },
+   "linux": {
+    "design": "ftrace: function tracer and latency tracers; dynamic ftrace turns mcount/fentry call sites into NOPs at boot and patches them back when enabled. eBPF programs, checked by the verifier, attach to probes; bpftrace offers a DTrace-like language. Oracle maintains a Linux DTrace built on BPF.",
+    "strengths": [
+     "One verified bytecode serves tracing, networking and scheduling (sched_ext)",
+     "ftrace is near-zero cost when off"
+    ],
+    "weaknesses": [
+     "The verifier is a large, complex component (Inference)"
+    ]
+   },
+   "magia_pick": {
+    "text": "Static probe points (DTrace SDT style) registered through linker sets now; NOP-patched function-entry hooks (ftrace style) later; one small verified bytecode VM for probe actions, shared with the packet filter.",
+    "label": "Inference",
+    "why": "Static probes are cheap to add while the code is young; a single verified VM serves several subsystems, as eBPF shows.",
+    "fit_with_plan": "Plan already uses linker sets; tracing not yet planned.",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "DTrace: 'zero probe effect' when disabled, designed to be 'absolutely safe', about 30,000 kernel probes on small systems, D language (2004).",
+     "label": "Verified",
+     "sources": [
+      "S70"
+     ]
+    },
+    {
+     "text": "FreeBSD: full kernel DTrace, experimental userland DTrace.",
+     "label": "Verified",
+     "sources": [
+      "S71"
+     ]
+    },
+    {
+     "text": "kinst provider (any instruction in a kernel function) since FreeBSD 14.0.",
+     "label": "Verified",
+     "sources": [
+      "S72"
+     ]
+    },
+    {
+     "text": "Dynamic ftrace converts mcount/fentry call sites to NOPs at boot and patches them when tracing is enabled.",
+     "label": "Verified",
+     "sources": [
+      "S73"
+     ]
+    },
+    {
+     "text": "Oracle's dtrace-utils is the 'official Linux port of the DTrace tracing tool' and needs a BPF toolchain.",
+     "label": "Verified",
+     "sources": [
+      "S74"
+     ]
+    },
+    {
+     "text": "bpftrace is 'inspired by awk, C, and predecessor tracers such as DTrace and SystemTap'.",
+     "label": "Verified",
+     "sources": [
+      "S75"
+     ]
+    }
+   ],
+   "sources": [
+    "S70",
+    "S71",
+    "S72",
+    "S73",
+    "S74",
+    "S75"
+   ]
+  },
+  {
+   "n": 12,
+   "id": "abi",
+   "subsystem": "Syscall ABI stability and documentation",
+   "freebsd": {
+    "design": "One master file (syscalls.master) generates the syscall tables; COMPAT4..COMPAT15 entries compiled under COMPAT_FREEBSDx options keep old binaries running; a CAPENABLED flag per syscall. Stable branches must keep ABI and API compatibility; the kernel's own binary interface (KBI) is defined; one kernel can serve several userland ABIs (FreeBSD amd64 and i386, Linux x86_64 and i386). Syscall man pages live in the source tree.",
+    "strengths": [
+     "Single source of truth for the syscall table",
+     "Explicit compatibility shims per old release",
+     "Docs maintained next to the code (219 section-2 pages in lib/libsys)"
+    ],
+    "weaknesses": [
+     "Compatibility promise is per stable branch; old ABIs need compile-time COMPAT options"
+    ]
+   },
+   "linux": {
+    "design": "'We don't cause regressions' is the first rule: userland interfaces (syscalls, procfs, sysfs) must keep working; in-kernel APIs are deliberately unstable. Documentation/ABI marks interfaces stable/testing/obsolete/removed. Syscall man pages are a separate project.",
+    "strengths": [
+     "Strongest userland promise: applications keep working across releases",
+     "Freedom to rework internal APIs (USB reworked at least three times)"
+    ],
+    "weaknesses": [
+     "No stable module API: out-of-tree drivers break",
+     "Syscall docs live outside the kernel tree"
+    ]
+   },
+   "magia_pick": {
+    "text": "One master syscall table that generates dispatch, typed argument validation, capability flags and a doc stub; man pages in the Magia tree; a per-ABI personality table so a compatibility ABI can be added later; adopt Linux's 'never break userspace' promise once Magia has users; keep internal APIs unstable.",
+    "label": "Inference",
+    "why": "FreeBSD's generator removes drift between table, checks and docs; Linux's rule is the clearest user promise but costs more once made, so make it when there are users.",
+    "fit_with_plan": "Plan has a 'syscall table with typed argument validation' and Linux-style negative errno returns.",
+    "confidence": "high"
+   },
+   "claims": [
+    {
+     "text": "'We don't cause regressions' is the first rule of Linux kernel development; it covers procfs, sysfs and other userland interfaces but not kernel-internal interfaces such as the module API.",
+     "label": "Verified",
+     "sources": [
+      "S76"
+     ]
+    },
+    {
+     "text": "Linux has no stable in-kernel API or binary interface by design; the syscall interface 'is very stable over time, and will not break'; in-kernel USB interfaces were reworked at least three times.",
+     "label": "Verified",
+     "sources": [
+      "S77"
+     ]
+    },
+    {
+     "text": "Documentation/ABI stable interfaces are guaranteed at least 2 years; syscalls are expected never to change.",
+     "label": "Verified",
+     "sources": [
+      "S39"
+     ]
+    },
+    {
+     "text": "The Linux man-pages project documents the kernel and C library interfaces as a separate project.",
+     "label": "Verified",
+     "sources": [
+      "S84"
+     ]
+    },
+    {
+     "text": "syscalls.master generates the sysent tables and defines COMPAT4..COMPAT15 entry types and the CAPENABLED flag.",
+     "label": "Verified",
+     "sources": [
+      "S82"
+     ]
+    },
+    {
+     "text": "FreeBSD-STABLE 'must maintain ABI and API compatibility with earlier versions of that branch'; the amd64 kernel supports FreeBSD amd64/i386 and Linux x86_64/i386 userland ABIs.",
+     "label": "Verified",
+     "sources": [
+      "S83"
+     ]
+    },
+    {
+     "text": "219 section-2 syscall man pages are in freebsd-src lib/libsys (my count, 2026-11-20).",
+     "label": "Verified",
+     "sources": [
+      "S85"
+     ]
+    }
+   ],
+   "sources": [
+    "S76",
+    "S77",
+    "S39",
+    "S84",
+    "S82",
+    "S83",
+    "S85"
+   ]
+  },
+  {
+   "n": 13,
+   "id": "license",
+   "subsystem": "License: BSD-2-Clause vs GPLv2 and the effect on reuse",
+   "freebsd": {
+    "design": "BSD-2-Clause for the compilation and for new code; the static GENERIC kernel must be BSD-licensed or similar; GPL, APSL and CDDL code is allowed only in loadable modules (CDDL approved for DTrace and ZFS).",
+    "strengths": [
+     "Permissive: code can be reused in almost any project with notices kept"
+    ],
+    "weaknesses": [
+     "No obligation for downstream users to share changes (Inference)"
+    ]
+   },
+   "linux": {
+    "design": "GPL-2.0-only with the syscall note: programs that only use syscalls are not derived works. Individual files may be GPL-compatible or dual-licensed (e.g. GPL plus BSD or MIT). Every file carries an SPDX identifier.",
+    "strengths": [
+     "Copyleft keeps derived kernels open (Inference)",
+     "Syscall note keeps user programs free of GPL obligations"
+    ],
+    "weaknesses": [
+     "GPL-2.0-only code cannot be copied into a BSD-licensed kernel"
+    ]
+   },
+   "magia_pick": {
+    "text": "Keep Magia's BSD-2-Clause licence, add an SPDX line to every file (both projects use SPDX), and keep the documented clean-room rule (ideas only, no copied code). If code is ever imported, only BSD/MIT-licensed code or the permissive side of dual-licensed Linux files is compatible.",
+    "label": "Inference",
+    "why": "BSD-2 matches FreeBSD's policy and keeps every FreeBSD idea and permissively licensed driver reusable; GPL-only Linux code would force a licence change. Legal reading, not legal advice.",
+    "fit_with_plan": "Magia's LICENSE is BSD 2-Clause; the plan forbids copying code from Linux or FreeBSD.",
+    "confidence": "high (facts); legal reading is Inference"
+   },
+   "claims": [
+    {
+     "text": "Linux is GPL-2.0-only with an explicit syscall exception; files may be dual-licensed with BSD or MIT; SPDX identifiers are required.",
+     "label": "Verified",
+     "sources": [
+      "S78"
+     ]
+    },
+    {
+     "text": "Syscall note: user programs using kernel services by normal system calls are not 'derived work'; only GPL v2 is valid.",
+     "label": "Verified",
+     "sources": [
+      "S79"
+     ]
+    },
+    {
+     "text": "FreeBSD's compilation is under BSD-2 terms (Copyright 1992-2026 The FreeBSD Project).",
+     "label": "Verified",
+     "sources": [
+      "S80"
+     ]
+    },
+    {
+     "text": "New FreeBSD code should use BSD-2-Clause; 'GPL, APSL, CDDL, etc, licensed software must not be compiled into the static GENERIC kernel'; allowed in pre-compiled modules; CDDL approved for DTrace and ZFS.",
+     "label": "Verified",
+     "sources": [
+      "S81"
+     ]
+    },
+    {
+     "text": "Linux iwlwifi and rtw89 are 'GPL-2.0 OR BSD-3-Clause'; i915 and amdgpu carry MIT permission text; nvme host core is 'GPL-2.0'.",
+     "label": "Verified",
+     "sources": [
+      "S95"
+     ]
+    },
+    {
+     "text": "Magia is BSD 2-Clause and its plan forbids copying code from Linux or FreeBSD.",
+     "label": "Verified",
+     "sources": [
+      "L1"
+     ]
+    },
+    {
+     "text": "A BSD-2 kernel may import BSD/MIT code and the permissive side of dual-licensed files, but not GPL-2.0-only code without relicensing (not legal advice).",
+     "label": "Inference",
+     "sources": [
+      "S78",
+      "S81"
+     ]
+    }
+   ],
+   "sources": [
+    "S78",
+    "S79",
+    "S80",
+    "S81",
+    "S95",
+    "L1"
+   ]
+  },
+  {
+   "n": 14,
+   "id": "drivers",
+   "subsystem": "Driver breadth",
+   "freebsd": {
+    "design": "Native drivers in sys/dev plus Linux drivers run through the LinuxKPI compatibility layer: Wi-Fi (iwlwifi, rtw88, rtw89; mt76 in progress) in sys/contrib/dev, and AMD/Intel GPU drivers ported one Linux version at a time in drm-kmod (ports). The FreeBSD Foundation funds a laptop-support project.",
+    "strengths": [
+     "LinuxKPI reuses permissively licensed Linux drivers 'mostly unmodified'"
+    ],
+    "weaknesses": [
+     "Lag and gaps: DRM drivers at Linux 6.12 LTS for FreeBSD 15.1 (Q2 2026); ath11k/ath12k TODO and brcmfmac missing shims (Q1 2026)"
+    ]
+   },
+   "linux": {
+    "design": "Drivers are kept in-tree and are fixed together with internal API changes; drivers/ is about 70% of the source tree by bytes.",
+    "strengths": [
+     "Largest driver set; in-tree drivers stay working when APIs change"
+    ],
+    "weaknesses": [
+     "Out-of-tree drivers get no stable API"
+    ]
+   },
+   "magia_pick": {
+    "text": "Do not chase breadth: target QEMU's virtual devices first (virtio), then a few common real devices; keep drivers in-tree with an unstable internal API; shape the driver interfaces so a LinuxKPI-like shim could host permissively licensed Linux drivers later, if the no-copy rule is ever relaxed.",
+    "label": "Inference",
+    "why": "Even FreeBSD relies on Linux for GPU and Wi-Fi drivers; a hobby kernel cannot close that gap by writing drivers alone.",
+    "fit_with_plan": "Plan covers serial, VGA, PIC and PIT only.",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "Linux master: drivers/ = 38,199 files, 1,165 MB, 69.5% of 1,676 MB of source bytes. FreeBSD main sys/: 548 MB, of which sys/dev 190 MB (34.6%) and sys/contrib/dev 98 MB (17.9%, incl. iwlwifi, rtw88, rtw89, mediatek, athk). Bytes, not device counts (my count, 2026-11-20).",
+     "label": "Verified",
+     "sources": [
+      "S94"
+     ]
+    },
+    {
+     "text": "FreeBSD uses 'permissively licensed Linux wireless drivers, mostly unmodified' via LinuxKPI, updated to Linux v6.19; iwlwifi, rtw88, rtw89 ship; mt76 in progress; ath11k/ath12k TODO; brcmfmac lacks cfg80211 shims (Q1 2026).",
+     "label": "Verified",
+     "sources": [
+      "S92"
+     ]
+    },
+    {
+     "text": "drm-kmod: 'The DRM drivers ported from Linux to FreeBSD using linuxkpi'.",
+     "label": "Verified",
+     "sources": [
+      "S93"
+     ]
+    },
+    {
+     "text": "Q2 2026: AMD and Intel DRM drivers ported one Linux version at a time; Linux 6.12 LTS port finished for FreeBSD 15.1; Foundation funds the Laptop Support and Usability project.",
+     "label": "Verified",
+     "sources": [
+      "S110"
+     ]
+    },
+    {
+     "text": "In-tree Linux drivers are fixed when internal interfaces change.",
+     "label": "Verified",
+     "sources": [
+      "S77"
+     ]
+    }
+   ],
+   "sources": [
+    "S94",
+    "S92",
+    "S93",
+    "S110",
+    "S77"
+   ]
+  },
+  {
+   "n": 15,
+   "id": "mitigations",
+   "subsystem": "Security mitigations: KASLR, SMEP/SMAP, CFI, stack protector, W^X",
+   "freebsd": {
+    "design": "Userland ASLR, PIE, W^X policy and PROT_MAX; RELRO; stack protector (kernel built with -fstack-protector and one global canary on amd64); SMAP and SMEP used automatically on amd64; per-vulnerability hardware mitigation sysctls. No KASLR; kernel CFI not committed.",
+    "strengths": [
+     "Simple, documented per-process controls (proccontrol, sysctl)"
+    ],
+    "weaknesses": [
+     "No KASLR (bug report, 2026-05-23)",
+     "kCFI review accepted 2026-06-03 but not in main as of 2026-11-20"
+    ]
+   },
+   "linux": {
+    "design": "Kernel text and read-only data never writable (STRICT_KERNEL_RWX since 4.11), __ro_after_init, SMEP/SMAP, stack protector (strong), KASLR for kernel and modules, structure-layout randomisation, zero-initialised stacks, hardened usercopy, IBT and kCFI/FineIBT, page-table isolation, kernel-stack erasing (KSPP list).",
+    "strengths": [
+     "Broadest kernel self-protection set, with a maintained recommended configuration"
+    ],
+    "weaknesses": [
+     "Many options are build-time choices; defaults vary by distribution (Inference)"
+    ]
+   },
+   "magia_pick": {
+    "text": "Linux/KSPP as the baseline. Magia's plan already has NX/WP/SMEP/SMAP, W^X kernel mappings and stack canaries at thread-stack bottoms. Add next: compiler stack protector (strong) and zero-initialised stack variables for the C code, guard pages for kernel stacks, hardened copyin/copyout, Clang kCFI plus IBT for C; KASLR once the kernel can relocate (it is linked at a fixed higher-half address).",
+    "label": "Inference",
+    "why": "Hardening is cheapest before code grows; Linux's list is documented and measured in production; FreeBSD lacks KASLR and kernel CFI.",
+    "fit_with_plan": "Partly in the plan (NX/WP/SMEP/SMAP, W^X, stack canaries, SMAP-aware copyin/copyout).",
+    "confidence": "high (facts); pick is Inference"
+   },
+   "claims": [
+    {
+     "text": "FreeBSD mitigations(7) lists ASLR/PIE, W^X (allow_wx), PROT_MAX, RELRO, SSP (kernel -fstack-protector, single global canary except aarch64 option), FORTIFY_SOURCE, SMAP/SMEP automatic on amd64, Capsicum; no KASLR or kernel CFI entry.",
+     "label": "Verified",
+     "sources": [
+      "S86"
+     ]
+    },
+    {
+     "text": "Bug 295522 (2026-05-23) states 'FreeBSD does not implement KASLR'.",
+     "label": "Reported",
+     "sources": [
+      "S89"
+     ]
+    },
+    {
+     "text": "amd64 FreeBSD kernels can load anywhere in the lower 4 GB physically since 2025-06 (relocation, not randomisation).",
+     "label": "Verified",
+     "sources": [
+      "S90"
+     ]
+    },
+    {
+     "text": "FreeBSD kCFI review D46193 was accepted on 2026-06-03, but main has no KCFI build option and commit search finds no 'kcfi' commit (2026-11-20).",
+     "label": "Inference",
+     "sources": [
+      "S91"
+     ]
+    },
+    {
+     "text": "Linux self-protection: executable code and read-only data must not be writable; __ro_after_init; SMEP/SMAP; stack canary; KASLR of kernel and module base; structure layout randomisation; memory initialisation.",
+     "label": "Verified",
+     "sources": [
+      "S87"
+     ]
+    },
+    {
+     "text": "KSPP recommends STRICT_KERNEL_RWX (since 4.11), STACKPROTECTOR_STRONG, HARDENED_USERCOPY, INIT_STACK_ALL_ZERO, RANDOMIZE_BASE, X86_KERNEL_IBT, CFI_CLANG, PAGE_TABLE_ISOLATION, RANDSTRUCT_FULL, ZERO_CALL_USED_REGS, KSTACK_ERASE (since 6.17).",
+     "label": "Verified",
+     "sources": [
+      "S88"
+     ]
+    },
+    {
+     "text": "Magia plan: NX/WP/SMEP/SMAP, W^X layout, stack canaries at stack bottoms, SMAP-aware copyin/copyout; kernel linked at 0xffffffff80000000.",
+     "label": "Verified",
+     "sources": [
+      "L1"
+     ]
+    }
+   ],
+   "sources": [
+    "S86",
+    "S89",
+    "S90",
+    "S91",
+    "S87",
+    "S88",
+    "L1"
+   ]
+  },
+  {
+   "n": 16,
+   "id": "rust",
+   "subsystem": "Rust in each kernel: where it is used and why",
+   "freebsd": {
+    "design": "No Rust in the kernel tree. A 2025 proof of concept builds optional Rust userland programs ('We do NOT currently support Rust in the kernel'). Out of tree, a Rust kernel programming interface (KPI) with a virtio-sound driver and Apple M2 drivers is in development (x86-64 and aarch64 only; interfaces not yet stable). The 2024 debate stalled on build cost and missing build integration.",
+    "strengths": [
+     "Rust KPI avoids external crates and allocating std parts, aiming for C-like stability"
+    ],
+    "weaknesses": [
+     "No in-tree kernel Rust; 2024 estimate that Rust in base would 'double our build times'"
+    ]
+   },
+   "linux": {
+    "design": "Rust support merged in 6.1 as an experiment, declared concluded at the 2025 Maintainers Summit ('Rust is here to stay'). Mainline Rust users include the Android Binder driver (6.18), parts of the Nova NVIDIA driver, the Tyr GPU driver, rnull, two PHY drivers and the DRM panic QR generator; Android 16 ships Rust ashmem. Drivers must use safe subsystem abstractions, not raw C bindings. The first CVE in Rust kernel code (CVE-2025-68260, Binder) was a race in an unsafe block.",
+    "strengths": [
+     "Production use on millions of Android devices",
+     "Maintainers report Rust drivers 'far safer'; 41% of C null_blk fixes were memory-safety fixes"
+    ],
+    "weaknesses": [
+     "Mixed-language toolchain cost; not all architectures/configurations work",
+     "unsafe blocks still produce CVEs"
+    ]
+   },
+   "magia_pick": {
+    "text": "Keep the plan's split: C for boot, CPU, MMU and context switch; a no_std Rust crate with zero external dependencies for policy subsystems. Confine unsafe code and FFI to one module that exposes safe abstractions (Linux's rule), require a written safety argument for every unsafe block, and pin the toolchain.",
+    "label": "Inference",
+    "why": "The reason both projects give for Rust is memory safety, not speed; Linux's experience shows the gain comes from safe abstractions and that remaining bugs cluster in unsafe code.",
+    "fit_with_plan": "Matches the plan (rust/ crate, stable toolchain, x86_64-unknown-none, 'ffi + kenv').",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "Rust support was merged in v6.1 as an experiment; at the 2025 Maintainers Summit the experiment was deemed concluded: 'Rust is here to stay'; not everything works for every configuration, architecture or toolchain.",
+     "label": "Verified",
+     "sources": [
+      "S97"
+     ]
+    },
+    {
+     "text": "Nova pieces merged; Binder merged for 6.18; Android 16 on 6.12 ships Rust ashmem; Rust code grew about fivefold in a year; DRM maintainer: 'about a year away' from requiring Rust for new drivers; Kroah-Hartman: Rust drivers 'proving to be far safer'.",
+     "label": "Reported",
+     "sources": [
+      "S96"
+     ]
+    },
+    {
+     "text": "Rust users in mainline: AMCC QT2025 PHY, Android Binder, ASIX PHY, DRM panic QR generator, Nova, rnull, Tyr; outside mainline: ashmem, Apple AGX, NVMe, PuzzleFS. Each subsystem decides whether to take Rust.",
+     "label": "Verified",
+     "sources": [
+      "S98"
+     ]
+    },
+    {
+     "text": "Drivers should not use C bindings directly; subsystems provide safe abstractions.",
+     "label": "Verified",
+     "sources": [
+      "S99"
+     ]
+    },
+    {
+     "text": "CVE-2025-68260 (published 2025-12-16): race condition in an unsafe list removal in Rust Binder.",
+     "label": "Verified",
+     "sources": [
+      "S100"
+     ]
+    },
+    {
+     "text": "41% of fixes merged for the C null_blk driver were memory-safety fixes.",
+     "label": "Reported",
+     "sources": [
+      "S102"
+     ]
+    },
+    {
+     "text": "Android: memory-safety share of vulnerabilities fell from 76% to 24% over six years as new code moved to memory-safe languages (mostly userland code).",
+     "label": "Reported",
+     "sources": [
+      "S105"
+     ]
+    },
+    {
+     "text": "FreeBSD optional Rust (May 2025) covers userland only: 'We do NOT currently support Rust in the kernel.'",
+     "label": "Verified",
+     "sources": [
+      "S106"
+     ]
+    },
+    {
+     "text": "2024: Rust in FreeBSD base would 'double our build times'; Losh: status quo cannot change until someone does build integration.",
+     "label": "Verified",
+     "sources": [
+      "S107"
+     ]
+    },
+    {
+     "text": "Out-of-tree FreeBSD Rust KPI: virtio sound driver, Apple M2 drivers; x86-64 and aarch64 only; KPIs 'not very stable'; no dependency on the wider Rust ecosystem; non-allocating std subset (2026-01-10).",
+     "label": "Verified",
+     "sources": [
+      "S108"
+     ]
+    },
+    {
+     "text": "Magia plan: C core plus a no_std Rust staticlib with zero dependencies; toolchain stable, target x86_64-unknown-none.",
+     "label": "Verified",
+     "sources": [
+      "L1"
+     ]
+    }
+   ],
+   "sources": [
+    "S97",
+    "S96",
+    "S98",
+    "S99",
+    "S100",
+    "S102",
+    "S105",
+    "S106",
+    "S107",
+    "S108",
+    "L1"
+   ]
+  },
+  {
+   "n": 17,
+   "id": "rust_perf",
+   "subsystem": "C vs Rust performance in kernel code",
+   "freebsd": {
+    "design": "No FreeBSD kernel measurement found (Unknown).",
+    "strengths": [],
+    "weaknesses": []
+   },
+   "linux": {
+    "design": "Three sources measure Rust kernel drivers against C: a peer-reviewed study (2024), the Rust-for-Linux maintainers' own benchmarks (2025 rebases), and a master's thesis (2025).",
+    "strengths": [
+     "Mature, feature-matched Rust drivers are within about +/-3% (NVMe) and -5% to +15% (null block) of C in maintainers' benchmarks"
+    ],
+    "weaknesses": [
+     "2024 study: up to 61% slower or 67% faster by configuration; e1000 11x slower ping latency (missing features); binaries 1.2x-2.4x larger",
+     "Thesis: GPIO module 8-14% slower and 28-46% more energy"
+    ]
+   },
+   "magia_pick": {
+    "text": "Speed is not a reason against Rust in Magia. Watch the known costs: binary size, bounds checks in hot loops, coarse locks and emulated bit fields. Magia's single Giant lock is fine for uniprocessor but should become finer-grained locks before SMP.",
+    "label": "Inference",
+    "why": "Where the Rust and C drivers implement the same features, the measured gap is small; the large gaps traced to missing features or coarse locking.",
+    "fit_with_plan": "Plan: uniprocessor, one Giant lock around Rust subsystem state.",
+    "confidence": "medium"
+   },
+   "claims": [
+    {
+     "text": "ATC 2024: Rust drivers 'on par' with C 'within a 20% gap'; e1000 11x slower ping latency (lacks features such as prefetch); Binder about 10% latency gap; NVMe/null block from 61% degradation to 67% improvement by setting; binaries 1.2x (binder) to 2.4x (gpio) larger; causes: coarse locks, bounds checks, emulated bit fields, pointer-heavy ownership.",
+     "label": "Verified",
+     "sources": [
+      "S103"
+     ]
+    },
+    {
+     "text": "Rust NVMe driver (v6.15 rebase): (R-C)/C between about -3% and +3% for random reads on one core (Ryzen 5 7600, Samsung 990 Pro); the driver is 'not currently suitable for general use'. Values read from the plot.",
+     "label": "Reported",
+     "sources": [
+      "S101"
+     ]
+    },
+    {
+     "text": "rnull (v6.19-rc5): IOPS difference vs C mostly between -5% and +15% across block sizes and queue depths; authors warn earlier results may mislead because distributions were not normal. Values read from the plot.",
+     "label": "Reported",
+     "sources": [
+      "S102"
+     ]
+    },
+    {
+     "text": "Thesis (Raspberry Pi 4 GPIO module): Rust +8%, +11%, +14.3% execution time and +46.15%, +27.68%, +33.86% energy across three variants.",
+     "label": "Reported",
+     "sources": [
+      "S104"
+     ]
+    },
+    {
+     "text": "Magia plan: uniprocessor with one Giant IRQ-disabling lock plus a scheduler lock.",
+     "label": "Verified",
+     "sources": [
+      "L1"
+     ]
+    }
+   ],
+   "sources": [
+    "S103",
+    "S101",
+    "S102",
+    "S104",
+    "L1"
+   ]
+  }
+ ],
+ "conflicts": [
+  {
+   "topic": "First CVE in Rust kernel code",
+   "a": "LWN, 2025-12-13 [S96]: Kroah-Hartman said no CVE had yet been issued for Rust code.",
+   "b": "NVD, 2025-12-16 [S100]: CVE-2025-68260 published for Rust Binder.",
+   "weight": "Both were true on their dates; NVD is newer and primary, so the current fact is: one CVE exists, in an unsafe block."
+  },
+  {
+   "topic": "How fast Rust kernel drivers are versus C",
+   "a": "ATC 2024 [S103]: usually within 20%, but -61% to +67% by setting and e1000 11x slower.",
+   "b": "Rust-for-Linux maintainers, 2025 rebases [S101, S102]: NVMe within about +/-3%, rnull -5% to +15%. Thesis 2025 [S104]: GPIO 8-14% slower.",
+   "weight": "I weight the maintainers' newer, feature-matched benchmarks most for 'can Rust match C' (they have confidence intervals), while noting they are the authors' own numbers. ATC 2024 is peer-reviewed but measured older drivers with missing features; the thesis is one small driver."
+  },
+  {
+   "topic": "Capsicum's 2010 comparison with Linux",
+   "a": "Capsicum paper, 2010-08 [S3]: Linux Chromium sandbox 11,301 lines vs about 100 with Capsicum.",
+   "b": "seccomp filter mode arrived in Linux 3.5 [S5], after the paper; Landlock in 5.13 [S6].",
+   "weight": "Treat the line counts as historical; they compare with seccomp strict mode, not today's seccomp-bpf or Landlock."
+  },
+  {
+   "topic": "io_uring: speed vs safety",
+   "a": "Axboe, 2019 [S18]: rings give about 2.8x the IOPS of Linux aio (author's benchmark).",
+   "b": "Google, 2023-06-14 [S22] and Linux sysctl docs [S23]: io_uring was the top exploit target and can be disabled.",
+   "weight": "Not a contradiction but a trade-off; both are primary for their own claims. The Magia pick keeps rings but narrows them."
+  },
+  {
+   "topic": "ULE vs Linux scheduler",
+   "a": "Bouron et al., 2018-07 [S26]: no overall winner between ULE and CFS.",
+   "b": "Linux replaced CFS with EEVDF in 6.6, 2023-10-29 [S30].",
+   "weight": "The only head-to-head study predates EEVDF; no ULE-vs-EEVDF comparison was found, so the current answer is Unknown."
+  },
+  {
+   "topic": "KASLR in FreeBSD",
+   "a": "Commit 2025-06-22 [S90]: amd64 kernels are now physically relocatable.",
+   "b": "Bug 295522, 2026-05-23 [S89] and mitigations(7) [S86]: no KASLR.",
+   "weight": "Relocation is a prerequisite, not randomisation; I weight the 2026 bug report and the man page: FreeBSD has no KASLR."
+  }
+ ],
+ "would_change": [
+  "Magia needs to run Linux binaries: FreeBSD's multi-ABI design (one kernel, several userland ABIs) moves from 'later' to 'core' [S83].",
+  "The no-copy rule is relaxed or the licence becomes GPL-2.0: driver and file-system picks change, because Linux code could then be imported [S78, S81].",
+  "Magia goes SMP: per-CPU run queues, RCU-walk path lookup, per-CPU allocator caches and finer locks become urgent rather than later [S49, S53, S103].",
+  "A published ULE-vs-EEVDF benchmark appears: the scheduler pick could change [S26].",
+  "FreeBSD commits kernel CFI or KASLR, or Linux DRM starts requiring Rust for new drivers (stated as about a year away in Dec 2025): the mitigation and Rust comparisons would need updating [S91, S96].",
+  "The project prefers fewer languages: a C-only core changes the Rust row; the evidence then supports C with KSPP-style hardening [S88]."
+ ],
+ "not_verified": [
+  "The 2018 ULE vs CFS paper: only the abstract page was read; the PDF refused automated download (HTTP 403).",
+  "Rust-for-Linux benchmark values were read by eye from the SVG plots (rendered locally), not from raw data.",
+  "FreeBSD kernel CFI 'not committed' is inferred from absence: no KCFI option in main's sys/conf files and no commit-search hit for 'kcfi' on 2026-11-20.",
+  "No published ULE-vs-EEVDF comparison and no kqueue-vs-epoll benchmark were found or run.",
+  "FreeBSD's own lockless path-lookup work was not checked.",
+  "Driver breadth is measured in source bytes, not supported devices; generated register headers inflate Linux's count.",
+  "Google's Android memory-safety data is mostly userland code; applying it to kernel code is inference.",
+  "The LWN Rust session report relays statements made in a meeting (labelled Reported).",
+  "ZFS licensing: Torvalds' view is an opinion, not a court ruling. All licence readings here are not legal advice.",
+  "kernel.org docs, the nftables wiki and some FreeBSD docs show no page date; the HTTP Last-Modified date is given instead.",
+  "Whether Clang kCFI can cover Magia's Rust code was not checked."
+ ],
+ "sources": {
+  "S1": {
+   "title": "capsicum(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2026-01-23 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=capsicum&sektion=4&format=ascii"
+  },
+  "S2": {
+   "title": "cap_enter(2)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2023-03-09 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=cap_enter&sektion=2&format=ascii"
+  },
+  "S3": {
+   "title": "Watson, Anderson, Laurie, Kennaway: Capsicum: practical capabilities for UNIX",
+   "publisher": "USENIX Security 2010",
+   "published": "2010-08",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/legacy/event/sec10/tech/full_papers/Watson.pdf"
+  },
+  "S4": {
+   "title": "Seccomp BPF (SECure COMPuting with filters)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/userspace-api/seccomp_filter.html"
+  },
+  "S5": {
+   "title": "seccomp(2)",
+   "publisher": "Linux man-pages 6.19 (man7.org)",
+   "published": "2026-06-05 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man7.org/linux/man-pages/man2/seccomp.2.html"
+  },
+  "S6": {
+   "title": "Landlock: unprivileged access control",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/userspace-api/landlock.html"
+  },
+  "S7": {
+   "title": "Corbet: Capsicum for Linux",
+   "publisher": "LWN.net",
+   "published": "2014-07-02",
+   "accessed": "2026-11-19",
+   "url": "https://lwn.net/Articles/604015/"
+  },
+  "S8": {
+   "title": "jail(8)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-11-13 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=jail&sektion=8&format=ascii"
+  },
+  "S9": {
+   "title": "FreeBSD Handbook, ch. 17 Jails and Containers",
+   "publisher": "FreeBSD Documentation Portal",
+   "published": "no date shown (HTTP Last-Modified 2026-11-18)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.freebsd.org/en/books/handbook/jails/"
+  },
+  "S10": {
+   "title": "rctl(8)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2018-02-26 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=rctl&sektion=8&format=ascii"
+  },
+  "S11": {
+   "title": "namespaces(7)",
+   "publisher": "Linux man-pages 6.19 (man7.org)",
+   "published": "2026-02-08 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man7.org/linux/man-pages/man7/namespaces.7.html"
+  },
+  "S12": {
+   "title": "user_namespaces(7)",
+   "publisher": "Linux man-pages 6.19 (man7.org)",
+   "published": "2026-02-08 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man7.org/linux/man-pages/man7/user_namespaces.7.html"
+  },
+  "S13": {
+   "title": "Control Group v2",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/cgroup-v2.html"
+  },
+  "S14": {
+   "title": "Restricted unprivileged user namespaces are coming to Ubuntu 23.10",
+   "publisher": "Canonical, Ubuntu blog",
+   "published": "2023-10-09",
+   "accessed": "2026-11-19",
+   "url": "https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces"
+  },
+  "S15": {
+   "title": "kqueue(2)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2026-01-24 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=kqueue&sektion=2&format=ascii"
+  },
+  "S16": {
+   "title": "Lemon: Kqueue: A generic and scalable event notification facility",
+   "publisher": "USENIX ATC 2001, FREENIX track",
+   "published": "2001 (PDF Last-Modified 2001-05-01)",
+   "accessed": "2026-11-19",
+   "url": "https://people.freebsd.org/~jlemon/papers/kqueue.pdf"
+  },
+  "S17": {
+   "title": "epoll(7)",
+   "publisher": "Linux man-pages 6.19 (man7.org)",
+   "published": "2026-02-08 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man7.org/linux/man-pages/man7/epoll.7.html"
+  },
+  "S18": {
+   "title": "Axboe: Efficient IO with io_uring",
+   "publisher": "kernel.dk (author's paper)",
+   "published": "2019 (PDF dated 2019-10-15)",
+   "accessed": "2026-11-19",
+   "url": "https://kernel.dk/io_uring.pdf"
+  },
+  "S20": {
+   "title": "aio(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2021-01-02 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=aio&sektion=4&format=ascii"
+  },
+  "S21": {
+   "title": "aio_read(2)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-03-27 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=aio_read&sektion=2&format=ascii"
+  },
+  "S22": {
+   "title": "Koczka: Learnings from kCTF VRP's 42 Linux kernel exploits submissions",
+   "publisher": "Google Online Security Blog",
+   "published": "2023-06-14",
+   "accessed": "2026-11-19",
+   "url": "https://security.googleblog.com/2023/06/learnings-from-kctf-vrps-42-linux.html"
+  },
+  "S23": {
+   "title": "Documentation for /proc/sys/kernel/",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/sysctl/kernel.html"
+  },
+  "S24": {
+   "title": "sched_ule(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2012-08-10 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=sched_ule&sektion=4&format=ascii"
+  },
+  "S25": {
+   "title": "Roberson: ULE: A Modern Scheduler for FreeBSD",
+   "publisher": "USENIX BSDCon 2003",
+   "published": "2003-09",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/legacy/event/bsdcon03/tech/full_papers/roberson/roberson.pdf"
+  },
+  "S26": {
+   "title": "Bouron et al.: The Battle of the Schedulers: FreeBSD ULE vs. Linux CFS (abstract page; PDF refused automated download)",
+   "publisher": "USENIX ATC 2018",
+   "published": "2018-07",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/conference/atc18/presentation/bouron"
+  },
+  "S27": {
+   "title": "EEVDF Scheduler",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/scheduler/sched-eevdf.html"
+  },
+  "S28": {
+   "title": "Extensible Scheduler Class (sched_ext)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/scheduler/sched-ext.html"
+  },
+  "S29": {
+   "title": "Corbet: An EEVDF CPU scheduler for Linux",
+   "publisher": "LWN.net",
+   "published": "2023-03-09",
+   "accessed": "2026-11-19",
+   "url": "https://lwn.net/Articles/925371/"
+  },
+  "S30": {
+   "title": "Linux 6.6 (release summary)",
+   "publisher": "KernelNewbies",
+   "published": "release 2023-10-29",
+   "accessed": "2026-11-19",
+   "url": "https://kernelnewbies.org/Linux_6.6"
+  },
+  "S31": {
+   "title": "Linux 6.12 (release summary)",
+   "publisher": "KernelNewbies",
+   "published": "release 2024-11-17",
+   "accessed": "2026-11-19",
+   "url": "https://kernelnewbies.org/Linux_6.12"
+  },
+  "S32": {
+   "title": "Linux 6.8 (release summary)",
+   "publisher": "KernelNewbies",
+   "published": "release 2024-03-10",
+   "accessed": "2026-11-19",
+   "url": "https://kernelnewbies.org/Linux_6.8"
+  },
+  "S33": {
+   "title": "tuning(7)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2026-04-09 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=tuning&sektion=7&format=ascii"
+  },
+  "S34": {
+   "title": "commit a3b5daf4242f: sys: enable both SCHED_ULE and SCHED_4BSD for some configs (stable/15)",
+   "publisher": "dev-commits-src-all mailing list",
+   "published": "2026-02-11",
+   "accessed": "2026-11-19",
+   "url": "https://lists.freebsd.org/archives/dev-commits-src-all/2026-February/068522.html"
+  },
+  "S35": {
+   "title": "sysctl(3)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-07-31 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=sysctl&sektion=3&format=ascii"
+  },
+  "S36": {
+   "title": "sysctl(9)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-09-28 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=sysctl&sektion=9&format=ascii"
+  },
+  "S37": {
+   "title": "sysfs - The filesystem for exporting kernel objects",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/filesystems/sysfs.html"
+  },
+  "S38": {
+   "title": "sysctl(2)",
+   "publisher": "Linux man-pages 6.19 (man7.org)",
+   "published": "man-pages 6.19 (page date not recorded)",
+   "accessed": "2026-11-19",
+   "url": "https://man7.org/linux/man-pages/man2/sysctl.2.html"
+  },
+  "S39": {
+   "title": "Linux ABI description",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/abi.html"
+  },
+  "S40": {
+   "title": "geom(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2024-07-08 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=geom&sektion=4&format=ascii"
+  },
+  "S41": {
+   "title": "Device Mapper (index of targets)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/device-mapper/index.html"
+  },
+  "S42": {
+   "title": "Multi-Queue Block IO Queueing Mechanism (blk-mq)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/block/blk-mq.html"
+  },
+  "S43": {
+   "title": "Bjørling, Axboe, Nellans, Bonnet: Linux Block IO: Introducing Multi-queue SSD Access on Multi-core Systems",
+   "publisher": "SYSTOR 2013",
+   "published": "2013 (PDF dated 2013-05-21)",
+   "accessed": "2026-11-19",
+   "url": "https://kernel.dk/blk-mq.pdf"
+  },
+  "S44": {
+   "title": "FreeBSD Handbook, ch. 23 The Z File System (ZFS)",
+   "publisher": "FreeBSD Documentation Portal",
+   "published": "no date shown (HTTP Last-Modified 2026-11-18)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.freebsd.org/en/books/handbook/zfs/"
+  },
+  "S45": {
+   "title": "tunefs(8)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "FreeBSD 15.1 (page date not recorded)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=tunefs&sektion=8&format=ascii"
+  },
+  "S46": {
+   "title": "ext4 General Information",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/ext4.html"
+  },
+  "S47": {
+   "title": "Status (feature stability table)",
+   "publisher": "BTRFS documentation",
+   "published": "no date shown (HTTP Last-Modified 2026-10-16)",
+   "accessed": "2026-11-19",
+   "url": "https://btrfs.readthedocs.io/en/latest/Status.html"
+  },
+  "S48": {
+   "title": "Overview of the Linux Virtual File System",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/filesystems/vfs.html"
+  },
+  "S49": {
+   "title": "Pathname lookup",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/filesystems/path-lookup.html"
+  },
+  "S50": {
+   "title": "vnode(9)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-07-15 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=vnode&sektion=9&format=ascii"
+  },
+  "S51": {
+   "title": "Torvalds: forum post on ZFS in the thread 'Nuances related to Spinlock implementation'",
+   "publisher": "Real World Technologies forum",
+   "published": "2020-01-06",
+   "accessed": "2026-11-19",
+   "url": "https://www.realworldtech.com/forum/?threadid=189711&curpostid=189841"
+  },
+  "S52": {
+   "title": "Dillon: Design elements of the FreeBSD VM system",
+   "publisher": "FreeBSD Documentation Portal (article)",
+   "published": "c. 2000 (no exact date shown)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.freebsd.org/en/articles/vm-design/"
+  },
+  "S53": {
+   "title": "uma(9)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2023-01-16 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=uma&sektion=9&format=ascii"
+  },
+  "S54": {
+   "title": "Navarro, Iyer, Druschel, Cox: Practical, transparent operating system support for superpages",
+   "publisher": "OSDI 2002",
+   "published": "2002-12",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/legacy/event/osdi02/tech/full_papers/navarro/navarro.pdf"
+  },
+  "S55": {
+   "title": "FreeBSD 7.2-RELEASE Release Notes",
+   "publisher": "FreeBSD Project",
+   "published": "2009-05",
+   "accessed": "2026-11-19",
+   "url": "https://www.freebsd.org/releases/7.2R/relnotes/"
+  },
+  "S56": {
+   "title": "sys/amd64/amd64/pmap.c (main branch): pg_ps_enabled = 1",
+   "publisher": "FreeBSD source (cgit)",
+   "published": "main branch as fetched",
+   "accessed": "2026-11-19",
+   "url": "https://cgit.freebsd.org/src/plain/sys/amd64/amd64/pmap.c"
+  },
+  "S57": {
+   "title": "Multi-Gen LRU (admin guide)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/mm/multigen_lru.html"
+  },
+  "S58": {
+   "title": "Yu Zhao: [PATCH mm-unstable v15 00/14] Multi-Gen LRU Framework (cover letter)",
+   "publisher": "linux-mm via lore.kernel.org",
+   "published": "2022-09-18",
+   "accessed": "2026-11-19",
+   "url": "https://lore.kernel.org/all/20220918080010.2920238-1-yuzhao@google.com/"
+  },
+  "S59": {
+   "title": "Corbet: Clarifying memory management with page folios (incl. comment by M. Wilcox, 2021-03-19)",
+   "publisher": "LWN.net",
+   "published": "2021-03-18",
+   "accessed": "2026-11-19",
+   "url": "https://lwn.net/Articles/849538/"
+  },
+  "S60": {
+   "title": "netgraph(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2021-09-29 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=netgraph&sektion=4&manpath=FreeBSD+15.1-RELEASE&format=ascii"
+  },
+  "S61": {
+   "title": "Zec: Implementing a Clonable Network Stack in the FreeBSD Kernel",
+   "publisher": "USENIX ATC 2003, FREENIX track",
+   "published": "2003-06",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/legacy/event/usenix03/tech/freenix03/full_papers/zec/zec.pdf"
+  },
+  "S62": {
+   "title": "pf(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-07-02 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=pf&sektion=4&format=ascii"
+  },
+  "S63": {
+   "title": "FreeBSD Handbook, ch. 34 Firewalls",
+   "publisher": "FreeBSD Documentation Portal",
+   "published": "no date shown (HTTP Last-Modified 2026-11-18)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.freebsd.org/en/books/handbook/firewalls/"
+  },
+  "S64": {
+   "title": "What is nftables?",
+   "publisher": "nftables wiki",
+   "published": "no date shown (HTTP Last-Modified 2026-08-20)",
+   "accessed": "2026-11-19",
+   "url": "https://wiki.nftables.org/wiki-nftables/index.php/What_is_nftables%3F"
+  },
+  "S65": {
+   "title": "Main differences with iptables",
+   "publisher": "nftables wiki",
+   "published": "no date shown (HTTP Last-Modified 2026-08-20)",
+   "accessed": "2026-11-19",
+   "url": "https://wiki.nftables.org/wiki-nftables/index.php/Main_differences_with_iptables"
+  },
+  "S66": {
+   "title": "Høiland-Jørgensen et al.: The eXpress Data Path: Fast Programmable Packet Processing in the Operating System Kernel",
+   "publisher": "CoNEXT 2018 (author PDF, xdp-project)",
+   "published": "2018-12",
+   "accessed": "2026-11-19",
+   "url": "https://raw.githubusercontent.com/xdp-project/xdp-paper/master/xdp-the-express-data-path.pdf"
+  },
+  "S67": {
+   "title": "Rizzo: netmap: A Novel Framework for Fast Packet I/O (abstract page)",
+   "publisher": "USENIX ATC 2012",
+   "published": "2012-06",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/conference/atc12/technical-sessions/presentation/rizzo"
+  },
+  "S68": {
+   "title": "netmap(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2024-10-10 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=netmap&sektion=4&format=ascii"
+  },
+  "S69": {
+   "title": "eBPF verifier",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/bpf/verifier.html"
+  },
+  "S70": {
+   "title": "Cantrill, Shapiro, Leventhal: Dynamic Instrumentation of Production Systems",
+   "publisher": "USENIX ATC 2004",
+   "published": "2004-06",
+   "accessed": "2026-11-19",
+   "url": "https://www.usenix.org/legacy/event/usenix04/tech/general/full_papers/cantrill/cantrill.pdf"
+  },
+  "S71": {
+   "title": "FreeBSD Handbook, ch. 28 DTrace",
+   "publisher": "FreeBSD Documentation Portal",
+   "published": "no date shown (HTTP Last-Modified 2026-11-18)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.freebsd.org/en/books/handbook/dtrace/"
+  },
+  "S72": {
+   "title": "dtrace_kinst(4)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-07-16 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=dtrace_kinst&sektion=4&format=ascii"
+  },
+  "S73": {
+   "title": "ftrace - Function Tracer",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/trace/ftrace.html"
+  },
+  "S74": {
+   "title": "oracle/dtrace-utils README",
+   "publisher": "GitHub (Oracle), devel branch",
+   "published": "no date shown",
+   "accessed": "2026-11-19",
+   "url": "https://raw.githubusercontent.com/oracle/dtrace-utils/devel/README.md"
+  },
+  "S75": {
+   "title": "bpftrace README",
+   "publisher": "GitHub (bpftrace), master branch",
+   "published": "no date shown",
+   "accessed": "2026-11-19",
+   "url": "https://raw.githubusercontent.com/bpftrace/bpftrace/master/README.md"
+  },
+  "S76": {
+   "title": "Reporting regressions",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/reporting-regressions.html"
+  },
+  "S77": {
+   "title": "Kroah-Hartman: The Linux Kernel Driver Interface (stable-api-nonsense)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (text from the 2.6 era; HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/process/stable-api-nonsense.html"
+  },
+  "S78": {
+   "title": "Linux kernel licensing rules",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/process/license-rules.html"
+  },
+  "S79": {
+   "title": "LICENSES/exceptions/Linux-syscall-note",
+   "publisher": "torvalds/linux master (GitHub)",
+   "published": "file in master as fetched",
+   "accessed": "2026-11-19",
+   "url": "https://raw.githubusercontent.com/torvalds/linux/master/LICENSES/exceptions/Linux-syscall-note"
+  },
+  "S80": {
+   "title": "COPYRIGHT (Copyright (c) 1992-2026 The FreeBSD Project)",
+   "publisher": "freebsd-src main (GitHub mirror)",
+   "published": "file in main as fetched",
+   "accessed": "2026-11-19",
+   "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/main/COPYRIGHT"
+  },
+  "S81": {
+   "title": "FreeBSD Licensing Policy",
+   "publisher": "FreeBSD Documentation Portal",
+   "published": "no date shown (HTTP Last-Modified 2026-11-18)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.freebsd.org/en/articles/license-guide/"
+  },
+  "S82": {
+   "title": "sys/kern/syscalls.master",
+   "publisher": "freebsd-src main (GitHub mirror)",
+   "published": "file in main as fetched",
+   "accessed": "2026-11-19",
+   "url": "https://raw.githubusercontent.com/freebsd/freebsd-src/main/sys/kern/syscalls.master"
+  },
+  "S83": {
+   "title": "Committer's Guide",
+   "publisher": "FreeBSD Documentation Portal",
+   "published": "no date shown (HTTP Last-Modified 2026-11-18)",
+   "accessed": "2026-11-20",
+   "url": "https://docs.freebsd.org/en/articles/committers-guide/"
+  },
+  "S84": {
+   "title": "The Linux man-pages project",
+   "publisher": "kernel.org",
+   "published": "no date shown (HTTP Last-Modified 2026-07-10)",
+   "accessed": "2026-11-20",
+   "url": "https://www.kernel.org/doc/man-pages/"
+  },
+  "S85": {
+   "title": "lib/libsys directory listing (219 section-2 man pages)",
+   "publisher": "freebsd-src main via GitHub API",
+   "published": "main as fetched",
+   "accessed": "2026-11-20",
+   "url": "https://github.com/freebsd/freebsd-src/tree/main/lib/libsys"
+  },
+  "S86": {
+   "title": "mitigations(7)",
+   "publisher": "FreeBSD Project, FreeBSD 15.1 manual",
+   "published": "2025-01-29 (page date)",
+   "accessed": "2026-11-19",
+   "url": "https://man.freebsd.org/cgi/man.cgi?query=mitigations&sektion=7&format=ascii"
+  },
+  "S87": {
+   "title": "Kernel Self-Protection",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/security/self-protection.html"
+  },
+  "S88": {
+   "title": "Recommended Settings",
+   "publisher": "Kernel Self Protection Project (KSPP)",
+   "published": "no date shown (HTTP Last-Modified 2026-05-14)",
+   "accessed": "2026-11-19",
+   "url": "https://kspp.github.io/Recommended_Settings"
+  },
+  "S89": {
+   "title": "FreeBSD Bugzilla 295522: kcmp comparison results leak kernel object address ordering (informational - no KASLR)",
+   "publisher": "freebsd-bugs mailing list",
+   "published": "2026-05-23",
+   "accessed": "2026-11-20",
+   "url": "https://lists.freebsd.org/archives/freebsd-bugs/2026-May/034684.html"
+  },
+  "S90": {
+   "title": "commit 308659acbff3: libkvm/kvm_amd64: account for relocatable kernels",
+   "publisher": "dev-commits-src-all mailing list",
+   "published": "2025-06-22 (commit date)",
+   "accessed": "2026-11-20",
+   "url": "https://lists.freebsd.org/archives/dev-commits-src-all/2025-June/056536.html"
+  },
+  "S91": {
+   "title": "D46193: sys: implement Kernel CFI from clang (status Accepted, 2026-06-03); plus check of main sys/conf/kern.mk, sys/conf/options and GitHub commit search for 'kcfi'",
+   "publisher": "FreeBSD Phabricator; freebsd-src main",
+   "published": "review accepted 2026-06-03",
+   "accessed": "2026-11-20",
+   "url": "https://reviews.freebsd.org/D46193"
+  },
+  "S92": {
+   "title": "Zeeb: LinuxKPI 802.11 and Native Wireless Update",
+   "publisher": "FreeBSD Status Report, Q1 2026",
+   "published": "2026 Q1 report (Jan-Mar 2026)",
+   "accessed": "2026-11-20",
+   "url": "https://www.freebsd.org/status/report-2026-01-2026-03/lkpi-wireless/"
+  },
+  "S93": {
+   "title": "freebsd/drm-kmod README",
+   "publisher": "GitHub (FreeBSD)",
+   "published": "no date shown",
+   "accessed": "2026-11-20",
+   "url": "https://github.com/freebsd/drm-kmod"
+  },
+  "S94": {
+   "title": "Own count of source bytes per directory via the GitHub git/trees API (Linux master tree 8dac6df92a2e; FreeBSD main tree a8fd8a5a365a)",
+   "publisher": "Research Desk measurement",
+   "published": "2026-11-20",
+   "accessed": "2026-11-20",
+   "url": "https://api.github.com/repos/torvalds/linux/git/trees/master"
+  },
+  "S95": {
+   "title": "Licence headers of Linux driver files (iwlwifi/iwl-drv.c, rtw89/core.c, i915/i915_driver.c, amdgpu/amdgpu_device.c, nvme/host/core.c)",
+   "publisher": "torvalds/linux master (GitHub)",
+   "published": "files in master as fetched",
+   "accessed": "2026-11-20",
+   "url": "https://github.com/torvalds/linux/tree/master/drivers"
+  },
+  "S96": {
+   "title": "Corbet: The state of the kernel Rust experiment",
+   "publisher": "LWN.net",
+   "published": "2025-12-13",
+   "accessed": "2026-11-20",
+   "url": "https://lwn.net/Articles/1050174/"
+  },
+  "S97": {
+   "title": "Ojeda: [PATCH] rust: conclude the Rust experiment",
+   "publisher": "LWN.net mailing-list mirror",
+   "published": "2025-12-13",
+   "accessed": "2026-11-20",
+   "url": "https://lwn.net/Articles/1050308/"
+  },
+  "S98": {
+   "title": "Rust kernel policy (and site navigation: Users in mainline / outside mainline)",
+   "publisher": "Rust for Linux project site",
+   "published": "no date shown",
+   "accessed": "2026-11-19",
+   "url": "https://rust-for-linux.com/rust-kernel-policy"
+  },
+  "S99": {
+   "title": "General Information (Rust)",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-20",
+   "url": "https://docs.kernel.org/rust/general-information.html"
+  },
+  "S100": {
+   "title": "CVE-2025-68260: rust_binder: fix race condition on death_list",
+   "publisher": "NVD (NIST), source kernel.org CNA",
+   "published": "2025-12-16 (published)",
+   "accessed": "2026-11-20",
+   "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-68260"
+  },
+  "S101": {
+   "title": "NVMe Driver (Rust; performance plots per rebase, read for v6.15)",
+   "publisher": "Rust for Linux project site",
+   "published": "no date shown (latest plot: v6.15 rebase)",
+   "accessed": "2026-11-20",
+   "url": "https://rust-for-linux.com/nvme-driver"
+  },
+  "S102": {
+   "title": "Null Block Driver (Rust rnull; performance plots, read for v6.19-rc5)",
+   "publisher": "Rust for Linux project site",
+   "published": "no date shown (latest plot: v6.19-rc5 rebase)",
+   "accessed": "2026-11-20",
+   "url": "https://rust-for-linux.com/null-block-driver"
+  },
+  "S103": {
+   "title": "Li, Guo, Yang, Wang, Xu: An Empirical Study of Rust-for-Linux: The Success, Dissatisfaction, and Compromise",
+   "publisher": "USENIX ATC 2024",
+   "published": "2024-07",
+   "accessed": "2026-11-20",
+   "url": "https://www.usenix.org/system/files/atc24-li-hongyu.pdf"
+  },
+  "S104": {
+   "title": "Garber: Rust in the Linux Kernel: Analyzing Rust Implementations of Device Drivers (master's thesis)",
+   "publisher": "TU Wien (repositUm)",
+   "published": "2025",
+   "accessed": "2026-11-20",
+   "url": "https://repositum.tuwien.at/handle/20.500.12708/219628"
+  },
+  "S105": {
+   "title": "Vander Stoep, Rebert: Eliminating Memory Safety Vulnerabilities at the Source",
+   "publisher": "Google Online Security Blog",
+   "published": "2024-09-25",
+   "accessed": "2026-11-20",
+   "url": "https://security.googleblog.com/2024/09/eliminating-memory-safety-vulnerabilities-Android.html"
+  },
+  "S106": {
+   "title": "Status report on optional Rust in FreeBSD support (quotes Shawn Webb's report)",
+   "publisher": "LWN.net brief",
+   "published": "2025-05-21",
+   "accessed": "2026-11-20",
+   "url": "https://lwn.net/Articles/1022040/"
+  },
+  "S107": {
+   "title": "Losh: Re: The Case for Rust (in the base system) (quotes A. Somers, 2024-01-20)",
+   "publisher": "freebsd-hackers mailing list",
+   "published": "2024-07-31",
+   "accessed": "2026-11-20",
+   "url": "https://lists.freebsd.org/archives/freebsd-hackers/2024-July/003437.html"
+  },
+  "S108": {
+   "title": "Muñoz: Kernel Rust Support",
+   "publisher": "FreeBSD Status Report, Q4 2025",
+   "published": "2026-01-10 (last modified)",
+   "accessed": "2026-11-20",
+   "url": "https://www.freebsd.org/status/report-2025-10-2025-12/kernel_rust/"
+  },
+  "S109": {
+   "title": "Transparent Hugepage Support",
+   "publisher": "kernel.org docs, Linux 7.4.0-rc3",
+   "published": "no date shown (HTTP Last-Modified 2026-11-15)",
+   "accessed": "2026-11-19",
+   "url": "https://docs.kernel.org/admin-guide/mm/transhuge.html"
+  },
+  "S110": {
+   "title": "FreeBSD Status Report, Second Quarter 2026 (Foundation projects; DRM drivers entry)",
+   "publisher": "FreeBSD Project",
+   "published": "2026 Q2 report (Apr-Jun 2026)",
+   "accessed": "2026-11-20",
+   "url": "https://www.freebsd.org/status/report-2026-04-2026-06/"
+  },
+  "L1": {
+   "title": "Magia implementation plan (docs/plan.md) and LICENSE (BSD 2-Clause)",
+   "publisher": "this repository (Magia)",
+   "published": "2026-11-19 (file dates)",
+   "accessed": "2026-11-20",
+   "url": "docs/plan.md"
+  }
+ }
+}

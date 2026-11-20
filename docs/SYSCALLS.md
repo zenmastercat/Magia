@@ -121,7 +121,7 @@ Cap = allowed in Capsicum capability mode.
 | 44 | `sethostname` | `(buf, len)` → 0 | `EPERM` (jail without `JAIL_ALLOW_SET_HOSTNAME`), `ENAMETOOLONG` | **no** | as above |
 | 45 | `jail_set` | `(jid, what, value)` → 0; `what` is `JAIL_SET_CPU_WEIGHT`, `_MEM_MAX` or `_PIDS_MAX` | `EPERM` (own jail: only a strict ancestor may change limits), `ESRCH`, `EINVAL` | **no** | FreeBSD `jail_set`, cgroup limits |
 | 50 | `kqueue` | `()` → fd | `EMFILE` | yes | FreeBSD kqueue |
-| 51 | `kevent` | `(kq, changes*, nchanges ≤ 64, events*, nevents ≤ 64, timeout_ms: -1 forever, 0 poll)` → number of events | `EBADF` (not a kqueue), `ENOTCAPABLE` (`CAP_KQUEUE_CHANGE`/`_EVENT`), any change error when there is no room to report it | yes | FreeBSD kqueue |
+| 51 | `kevent` | `(kq, changes*, nchanges ≤ 64, events*, nevents ≤ 64, timeout_ms: -1 forever, 0 poll)` → number of events | `EBADF` (not a kqueue), `ENOTCAPABLE` (`CAP_KQUEUE_CHANGE`/`_EVENT`), any change error when there is no room to report it; per change: `ENOMEM` (a kqueue holds at most 1024 notes), `EINVAL` (TIMER/USER ident above 2^31-1) | yes | FreeBSD kqueue |
 | 60 | `uring_setup` | `(entries: power of 2, 1..256; uring_params*)` → fd | `EINVAL`, `EPERM` (kill switch or jail permission), `ENOMEM` (jail limit) | yes | Linux io_uring |
 | 61 | `uring_enter` | `(fd, to_submit, min_complete, flags=0)` → SQEs consumed | `EINVAL` (not a ring, `min_complete` > CQ size), `ENOTCAPABLE` (`CAP_URING`), `EPERM` (kill switch) | yes | Linux io_uring |
 | 70 | `futex` | `(u32 *uaddr, FUTEX_WAIT or FUTEX_WAKE, val, timeout_ms; 0 = forever)` → WAIT 0, WAKE number woken | `EAGAIN` (`*uaddr != val`), `ETIMEDOUT`, `EINVAL` (misaligned, unknown op), `EFAULT` | yes | Linux futex |
@@ -253,7 +253,7 @@ Ops:
 |---|---|
 | `NOP` | 0 |
 | `READ` / `WRITE` | as read/write; `off = URING_OFF_CURRENT` uses the file offset; a pipe that would block gives `-EAGAIN` |
-| `TIMEOUT` | completes after `off` ms with `-ETIME`, from the timer tick |
+| `TIMEOUT` | completes after `off` ms with `-ETIME`, from the timer tick; at most `entries` timeouts may be pending per ring, further ones complete at once with `-EAGAIN` (bounds kernel memory, which is not charged to a jail) |
 | unknown opcode or non-zero SQE flags | `-EINVAL` in the CQE |
 
 With `min_complete > 0`, `uring_enter` sleeps until that many CQEs are
@@ -263,9 +263,12 @@ Attack-surface controls. In June 2023 Google reported that 60% of the
 kernel exploit submissions to its kCTF vulnerability reward program in the
 previous year used io_uring, and that it had disabled io_uring on ChromeOS
 and its production servers. Sources: Research Desk,
-`docs/research/kernel-pros.md` (row 4, source
+[`docs/research/kernel-pros.md`](research/kernel-pros.md) (row 4, source
 S22), and K. Koczka, "Learnings from kCTF VRP's 42 Linux kernel exploits
-submissions", Google Online Security Blog, 2023-06-14. Magia therefore:
+submissions", Google Online Security Blog, 2023-06-14,
+<https://security.googleblog.com/2023/06/learnings-from-kctf-vrps-42-linux.html>
+("in the past year, there has been a clear trend: 60% of the submissions
+exploited the io_uring component"; checked 2026-11-20). Magia therefore:
 
 1. keeps only four ops;
 2. sends `READ`/`WRITE` through the same `io_read`/`io_write` path as the

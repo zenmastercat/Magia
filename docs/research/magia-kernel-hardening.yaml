@@ -1,0 +1,126 @@
+evidence_id: ev_3c825bd31eb821cbfa62927038cdb0e37ff35a7a187709ada416ee9d880312f2
+subject:
+  name: magia.elf
+  digest:
+    sha256: d20bb8e21ca91ed837dd7381923d738438f6ab07de27005522e8251e4cfae400
+  local_path: build/magia.elf
+  format: elf
+  architecture: x86_64
+provider:
+  id: rea-binary-hardening
+  name: REA binary hardening parser
+  version: "1"
+analysis_profile: null
+predicate_type: rea.analysis
+operation: inspect_binary_hardening
+parameters:
+  path: build/magia.elf
+  max_file_bytes: 67108864
+raw_result: null
+normalized_result:
+  artifact:
+    path: build/magia.elf
+    sha256: d20bb8e21ca91ed837dd7381923d738438f6ab07de27005522e8251e4cfae400
+    bytes: 6387456
+  format: elf
+  images[1]:
+    - format: elf
+      status: parsed
+      reason: null
+      architecture: x86_64
+      bits: 64
+      byte_order: little
+      machine: 62
+      slice: null
+      rows[10]:
+        - property: pie
+          state: disabled
+          confidence: observed
+          basis: e_type is ET_EXEC.
+          location:
+            offset: 16
+            bytes: 2
+          note: null
+          next_probe: null
+        - property: nx
+          state: unknown
+          confidence: observed
+          basis: PT_GNU_STACK is absent.
+          location: null
+          note: PT_GNU_STACK is absent. The usual Linux default for this architecture is a non-executable stack. This inspection does not apply that default.
+          next_probe: null
+        - property: relro
+          state: disabled
+          confidence: observed
+          basis: PT_GNU_RELRO is absent.
+          location: null
+          note: null
+          next_probe: null
+        - property: stack_protector
+          state: unknown
+          confidence: observed
+          basis: "The dynamic symbol table is absent, so stack protector use is unknown."
+          location: null
+          note: "The dynamic symbol table is absent, so stack protector use is unknown."
+          next_probe: null
+        - property: fortify
+          state: unknown
+          confidence: observed
+          basis: "The dynamic symbol table is absent, so FORTIFY use is unknown."
+          location: null
+          note: "The dynamic symbol table is absent, so FORTIFY use is unknown."
+          next_probe: null
+        - property: cet_ibt_shstk
+          state: disabled
+          confidence: observed
+          basis: CET IBT and SHSTK GNU property note is absent. These bits are opt-in.
+          location: null
+          note: null
+          next_probe: null
+        - property: aarch64_bti_pac
+          state: not_applicable
+          confidence: observed
+          basis: AArch64 BTI and PAC notes apply to a different architecture.
+          location: null
+          note: null
+          next_probe: null
+        - property: rpath
+          state: disabled
+          confidence: observed
+          basis: DT_RPATH is absent.
+          location: null
+          note: null
+          next_probe: null
+        - property: runpath
+          state: disabled
+          confidence: observed
+          basis: DT_RUNPATH is absent.
+          location: null
+          note: null
+          next_probe: null
+        - property: stripped
+          state: disabled
+          confidence: observed
+          basis: A section header has type SHT_SYMTAB.
+          location:
+            offset: 6387264
+            bytes: 64
+          note: null
+          next_probe: null
+  limitations[6]: "This inspection reads headers, program tables, dynamic symbols, and imports. It does not execute the image or assess exploitability.",A missing stack-protector or fortify symbol does not establish that the protection is absent.,"An undefined stack-protector or fortify symbol is a sign that some code uses the protection, not proof that all code does.","Authenticode and Mach-O code-signature rows report table or load-command presence, not signature validity.","PE control-flow guard state is the GuardFlags linker claim, not a check that CFG checks run.",Mach-O hardened runtime is not read here. inspect_signature owns CodeDirectory flags.
+confidence: observed
+authority: shipped-artifact
+environment: null
+limitations[6]: "This inspection reads headers, program tables, dynamic symbols, and imports. It does not execute the image or assess exploitability.",A missing stack-protector or fortify symbol does not establish that the protection is absent.,"An undefined stack-protector or fortify symbol is a sign that some code uses the protection, not proof that all code does.","Authenticode and Mach-O code-signature rows report table or load-command presence, not signature validity.","PE control-flow guard state is the GuardFlags linker claim, not a check that CFG checks run.",Mach-O hardened runtime is not read here. inspect_signature owns CodeDirectory flags.
+relationship_coverage: null
+locations[3]:
+  - kind: artifact-path
+    path: build/magia.elf
+  - kind: file-offset-range
+    start: 16
+    end: 18
+  - kind: file-offset-range
+    start: 6387264
+    end: 6387328
+evidence_links: []
+caller_input_path: build/magia.elf

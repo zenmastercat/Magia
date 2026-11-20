@@ -2,7 +2,7 @@
 
 Magia 0.1 is deliberately small. This file lists, honestly, what is *not*
 built. Items marked (RD) come from Research Desk's comparison
-(`docs/research/kernel-pros.md`, row in
+([`docs/research/kernel-pros.md`](research/kernel-pros.md), row in
 brackets).
 
 ## Known gaps in 0.1

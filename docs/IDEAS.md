@@ -8,12 +8,12 @@ from their formula (for example the nice-to-weight table, see EEVDF below).
 Two research notes back the choices:
 
 - **REA binary comparison** of the Linux 7.3.4 and FreeBSD 15.1 kernels
-  (`docs/research/rea-binary-comparison.md`):
+  ([`docs/research/rea-binary-comparison.md`](research/rea-binary-comparison.md)):
   FreeBSD registers sysctls, init hooks and probes through *linker sets*;
   Linux modules carry a signature and a build fingerprint (`vermagic`).
 - **Research Desk, "Magia kernel design: what FreeBSD and Linux each do
-  best"** (`docs/research/kernel-pros.md` and
-  `.json`, 2026-11-20; 17 rows, dated primary sources). Row numbers and
+  best"** ([`docs/research/kernel-pros.md`](research/kernel-pros.md) and
+  [`.json`](research/kernel-pros.json), 2026-11-20; 17 rows, dated primary sources). Row numbers and
   source IDs (S1, S22, ...) below refer to that file.
 
 Status: **built** = in the tree and tested; **partial** = simplified;

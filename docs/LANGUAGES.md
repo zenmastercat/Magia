@@ -108,6 +108,6 @@ tested on the host without a large mocking layer.
 5. No external crates: everything in the kernel is reviewable in-tree.
 
 Sources: Research Desk, *Magia kernel design: what FreeBSD and Linux each
-do best* (`docs/research/kernel-pros.md`,
+do best* ([`docs/research/kernel-pros.md`](research/kernel-pros.md),
 2026-11-20), rows 16-17; source IDs S97, S101, S102, S103, S106 as listed
 there.
