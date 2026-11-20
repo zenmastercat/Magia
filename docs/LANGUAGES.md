@@ -17,6 +17,8 @@ Magia is written in two languages on purpose. The rule is simple:
 | Serial and framebuffer consoles, PS/2 keyboard | C | `kernel/{console,fbcon,kbd,kbd_map}.c` |
 | ChaCha20 RNG | C | `kernel/rng.c` |
 | ACPI table parsing (firmware input) | Rust | `rust/src/acpi.rs` |
+| PCI/PCIe config space, BARs, MSI-X; xHCI controller | C | `kernel/{pci,xhci}.c` |
+| USB descriptors and HID reports (device input) | Rust | `rust/src/usb.rs` |
 | Buddy page allocator, page tables (W^X), kmalloc zones | C | `kernel/{pmm,vmm,kmem}.c` |
 | User windows, `copyin`/`copyout` (SMAP window + fault fixup) | C | `kernel/uvm.c` |
 | Threads, sleep/wakeup, preemption (mechanism) | C | `kernel/sched.c` |

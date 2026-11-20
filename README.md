@@ -15,14 +15,19 @@ runs on a real desktop PC.
 > source is in [docs/IDEAS.md](docs/IDEAS.md). It is a learning and
 > research project: not secure, not stable, not for real data.
 
-## What it does (stage 1)
+## What it does (stages 1 and 2)
 
 - Boots through **Limine** (UEFI and BIOS) from a GPT disk image; the
   kernel is a static **PIE** that Limine relocates and slides (**KASLR**),
   with a randomised direct map of all RAM (no size cap; tested with 32 GiB).
-- Framebuffer console (Spleen 8x16 font from OpenBSD) plus serial; PS/2
-  keyboard; the `magia>` debug monitor works on screen and on the serial
-  line.
+- Framebuffer console (Spleen 8x16 font from OpenBSD) plus serial; the
+  `magia>` debug monitor takes input from the serial line, a PS/2
+  keyboard, or a **USB keyboard** (stage 2).
+- **PCIe** enumeration over ECAM (MCFG), BAR sizing, **MSI-X/MSI**;
+  `lspci` in the monitor.
+- **xHCI USB 3 host controller** with a **HID boot-protocol keyboard**
+  on a root port, interrupts by MSI-X; descriptors and HID reports are
+  parsed in Rust; `usb` in the monitor.
 - ACPI tables (RSDP, XSDT/RSDT, MADT, HPET, MCFG, FADT) parsed **in Rust**
   as untrusted input, fuzzed by host tests.
 - Local APIC (xAPIC and x2APIC), I/O APIC, HPET; 1000 Hz tick from the
@@ -42,9 +47,11 @@ runs on a real desktop PC.
   syscall table with typed validation, **Capsicum**, **jails** with
   hierarchical accounting, VFS (ramfs, devfs, pipes), **kqueue**, an
   io_uring-style ring, **futex**, **sysctl**.
-- 95 in-kernel tests (`ktest`) and 153 host `cargo test`s; `make test`
-  boots the image nine times (OVMF/UEFI, 32 GiB, SeaBIOS, `noapic`, KVM,
-  the monitor, three deliberate crashes).
+- 102 in-kernel tests (`ktest`) and 159 host `cargo test`s; `make test`
+  boots the image ten times (OVMF/UEFI, 32 GiB, SeaBIOS, `noapic`, KVM,
+  the monitor over serial + PS/2, the monitor over a USB keyboard, three
+  deliberate crashes). The QEMU machine is q35 with `qemu-xhci` and
+  `usb-kbd`, like the target PC's USB-only input.
 
 Why two languages: [docs/LANGUAGES.md](docs/LANGUAGES.md).
 
@@ -81,11 +88,12 @@ nix-shell --run 'make test'                 # everything (see docs/TESTING.md)
 ```
 
 At the `magia>` prompt: `help`, `uname`, `cpu`, `ps`, `threads`, `jails`,
-`ls /dev`, `cat /etc/motd`, `sysctl`, `mem`, `uptime`, `poweroff`.
+`ls /dev`, `cat /etc/motd`, `sysctl`, `mem`, `uptime`, `lspci`, `usb`,
+`poweroff`.
 
 Kernel command line words: `ktest` (run the in-kernel tests and power
 off), `noapic` (8259 PIC + PIT), `nox2apic`, `notscdeadline`, `nohpet`,
-`nokbd`, `verbose` (print each boot step).
+`nokbd` (no PS/2), `noxhci` (no USB), `verbose` (print each boot step).
 
 ## Booting a real PC from a USB stick
 
@@ -104,10 +112,19 @@ sync
 
 Boot the PC from the stick (UEFI with Secure Boot off, or legacy
 BIOS/CSM). The Limine menu offers the normal boot, `noapic`, and `ktest`.
-What to expect on the target PC (Core Ultra 9 285K, RTX 5080): the
-framebuffer console uses the firmware's GOP mode; such boards usually have
-**no PS/2 keyboard and maybe no COM port**, so input needs the stage-2 USB
-(xHCI + HID) driver - see [docs/ROADMAP.md](docs/ROADMAP.md).
+
+What should work on the target PC (Core Ultra 9 285K, Z890-class board,
+RTX 5080) since stage 2 - untested on the real machine so far:
+
+- the framebuffer console in the firmware's GOP mode;
+- a **USB keyboard plugged directly into a rear USB port** of the board
+  (the Intel xHCI's root ports), typing at `magia>`; `usb` shows what was
+  found and `lspci` lists the PCIe devices;
+- not yet: keyboards behind a hub (front-panel headers, monitor or
+  keyboard hubs, some wireless receivers) - Magia has no hub driver;
+  keyboards that only speak a report protocol other than the boot
+  protocol; plugging the keyboard in after boot (no hot-plug). If nothing
+  appears, try another rear port and check `usb`.
 
 ## Documentation
 
@@ -118,7 +135,7 @@ framebuffer console uses the firmware's GOP mode; such boards usually have
 - [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) - adapted files and their licences
 - [docs/LANGUAGES.md](docs/LANGUAGES.md) - the C/Rust split and why
 - [docs/SYSCALLS.md](docs/SYSCALLS.md) - the system call ABI
-- [docs/plan-stage1.md](docs/plan-stage1.md), [docs/plan.md](docs/plan.md) - milestone plans
+- [docs/plan-stage2.md](docs/plan-stage2.md), [docs/plan-stage1.md](docs/plan-stage1.md), [docs/plan.md](docs/plan.md) - milestone plans
 
 ## License
 

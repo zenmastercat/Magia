@@ -10,14 +10,14 @@ a boot and then describes each subsystem.
             +-------------------- Rust: rust/src (libmagia_rs.a) -------------------+
  syscalls   | syscall table + validation -> Capsicum -> VFS(ramfs,devfs,pipe)      |
  ---------> | jails + accounting, process table, kqueue, rings, futex, sysctl MIB  |
- (ring 3 or | EEVDF policy (rs_sched_*)        ACPI tables (acpi.rs, rs_acpi_parse) |
+ (ring 3 or | EEVDF policy (rs_sched_*)  ACPI tables (acpi.rs)  USB data (usb.rs)  |
   ksyscall) +----------^---------------------------------------^--------------------+
                        | magia_* (rust.h, acpi.h)              | rs_* (rust.h)
  +---------------------+---------------------------------------+-------------------+
  | C: kernel/  boot.c (Limine)  sched.c (threads)  uvm.c (user windows, copyin)     |
  |   pmm.c (buddy)  vmm.c (W^X paging, immutable image)  kmem.c (zones)  rng.c      |
  |   trap.c  cpu.c  timer.c  lapic.c  ioapic.c  hpet.c  pic.c  acpi.c              |
- |   console.c  fbcon.c (Spleen font)  kbd.c  monitor.c (magia>)  ktest/  rustglue.c|
+ |   console.c  fbcon.c (Spleen font)  kbd.c  pci.c  xhci.c  monitor.c  ktest/      |
  +----------------------------------------------------------------------------------+
  | asm: arch/x86_64/ boot.S isr.S syscall.S switch.S user_blob.S                     |
  +----------------------------------------------------------------------------------+
@@ -71,8 +71,10 @@ All processes share one page table (per-process tables are stage 3).
 | 40000 | `intr`: 8259 remap+mask, LAPIC, I/O APIC, HPET, TSC and LAPIC timer calibration, tick (or 8259 + PIT with `noapic`) | `timer.c`, `lapic.c`, `ioapic.c`, `hpet.c`, `pic.c` |
 | 40001 | `kbd`: PS/2 keyboard (skipped if the FADT says no 8042) | `kbd.c` |
 | 40002 | `console_input`: COM1 receive interrupt | `console.c` |
+| 40003 | `pci`: ECAM enumeration (bus 0 and bridges), BAR sizing | `pci.c` |
 | 50000 | `sched`: boot thread = tid 1, idle thread = tid 0 | `sched.c` |
 | 50001 | `interrupts_on` | `main.c` |
+| 50002 | `xhci`: USB controller, root-port devices, the boot keyboard, MSI-X | `xhci.c`, `rust/src/usb.rs` |
 | 60000 | `rust`: `rs_init()` - jail 0, process 0, VFS, sysctl tree | `rustglue.c` |
 | 70000 | `syscall`: `EFER.SCE`, `STAR`, `LSTAR`, `SFMASK` | `syscall.c` |
 | 90000 | `vmm_lock`: lock the kernel image (immutable from here on) | `vmm.c` |
@@ -139,6 +141,36 @@ overrides, 8 ECAM windows, 64 tables). MADT semantics follow FreeBSD
 `madt.c`. No ACPICA, no AML: stage 2 needs only static tables (MCFG for
 ECAM, MADT for SMP).
 
+## PCI and USB (stage 2)
+
+- **pci.c**: configuration space through ECAM (base and bus range from
+  MCFG, segment 0); each bus's 1 MiB window is mapped uncached when first
+  scanned; bus 0 is scanned and bridges are followed to their secondary
+  buses (each bus once, depth bounded). Config accesses are bounded to the
+  function's 4 KiB. BARs are sized with decoding (and interrupts) off.
+  Capability lists are walked with the spec's limits (dword-aligned
+  pointers in 0x40..0xff, no revisits, at most 48). `pci_enable_msi()`
+  programs MSI-X (table checked to lie inside its BAR; all entries masked,
+  entry 0 to the BSP) or MSI, disables INTx; vectors 56-63 are handed out
+  and dispatched through the LAPIC like the timer. Legacy INTx is not
+  supported: its routing lives in ACPI `_PRT` methods (AML).
+- **xhci.c**: one xHCI controller (the first PCI class 0c/03/30), mostly
+  after OpenBSD's driver: BIOS hand-off, Intel port routing, reset,
+  device-context array and scratchpad buffers, a command ring and one
+  event ring (one 4 KiB page each, single segment, link TRB). At boot the
+  driver enumerates the root ports synchronously, polling the event ring:
+  port reset, Enable Slot, Address Device, the device descriptor (first
+  8 bytes, EP0 max-packet fix-up, then all 18), the configuration
+  descriptor, and - for the first HID boot keyboard - SET_CONFIGURATION,
+  SET_PROTOCOL(boot), Configure Endpoint and SET_IDLE(0). Then MSI-X (or
+  MSI, or a polling thread) takes over: each transfer event's report goes
+  to Rust, the resulting characters into the console input ring, and the
+  8-byte interrupt-IN transfer is queued again. Event TRBs are checked
+  (type, slot, endpoint, completion code, residual length) and only our
+  own ring addresses are compared, never dereferenced.
+- **usb.rs**: device/configuration descriptors and boot reports from the
+  device, parsed in Rust (see TESTING.md for the malformed-input tests).
+
 ## Consoles and input
 
 - `console.c`: COM1 (16550) is the primary console; every write is copied
@@ -146,9 +178,10 @@ ECAM, MADT for SMP).
   write-combining) with the Spleen 8x16 font from OpenBSD. The console
   keeps a character grid and a copy of what is on screen and redraws only
   changed cells, never reading the framebuffer.
-- Input: COM1's receive interrupt and the PS/2 keyboard (`kbd.c`, i8042 in
-  translated scancode set 1, `kbd_map.c` US layout) push bytes into one
-  ring that `console_getc_wait()` sleeps on.
+- Input: COM1's receive interrupt, the PS/2 keyboard (`kbd.c`, i8042 in
+  translated scancode set 1, `kbd_map.c` US layout) and the USB boot
+  keyboard (`xhci.c` + `usb.rs`) push bytes into one ring that
+  `console_getc_wait()` sleeps on.
 
 ## Kernel RNG
 
@@ -242,6 +275,7 @@ entropy (once), RDSEED, RDRAND, TSC jitter. API: `arc4random_buf`,
 | `kenv.rs` | the only path from Rust to C services (`magia_*`); a thread-local mock under `cargo test` |
 | `klock.rs` | `KLock`: IRQ-disabling spinlock (Giant for kernel state; separate SCHED and ACCT locks) |
 | `abi.rs` | `#[repr(C)]` mirror of `include/magia/abi.h`, size-checked against C at boot |
+| `usb.rs` | USB device/configuration descriptors and HID boot-keyboard reports from devices, parsed as untrusted input; reports to ASCII |
 | `acpi.rs` | static ACPI tables (RSDP, XSDT/RSDT, MADT, HPET, MCFG, FADT) parsed as untrusted input; no heap, fixed-size results, fuzzed by host tests |
 | `uaccess.rs` | typed `copyin`/`copyout` of user structures and strings (copied once, then validated) |
 | `syscall.rs` | the syscall table: typed argument descriptors, capability-mode flag, generic validation, dispatch, blocking loop |

@@ -18,16 +18,19 @@ framebuffer console + PS/2 keyboard, ACPI tables in Rust, LAPIC/x2APIC +
 I/O APIC + HPET + TSC deadline, ChaCha20 RNG, immutable kernel image. Plan
 and per-milestone tests: [plan-stage1.md](plan-stage1.md).
 
-## Stage 2: devices on the real PC
+## Stage 2 (done): a keyboard on a PC without PS/2
 
-- **PCIe enumeration** through ECAM (base from the ACPI MCFG table Magia
-  already parses); FreeBSD `dev/pci` as the model, OpenBSD `acpimcfg.c`
-  as a compact reference.
-- **USB keyboard**: xHCI + HID boot keyboard (OpenBSD `xhci.c`, `ukbd.c`,
-  ISC). Needed because the target board has no i8042 (Magia already skips
-  the PS/2 driver when the FADT says so) and maybe no COM port.
-- MSI/MSI-X for PCIe devices (no AML needed for them); interrupt
-  remapping (VT-d) before x2APIC ids above 255 can be targeted.
+PCIe enumeration over ECAM (MCFG), BARs, MSI-X/MSI, an xHCI host
+controller and a USB HID boot keyboard on a root port; `lspci`, `usb`.
+Plan and tests: [plan-stage2.md](plan-stage2.md). Still to do on the
+device side, carried into stages 3-4:
+
+- **USB hubs** (front panels, monitor hubs, many receivers), hot-plug
+  (port-change events), and resetting a halted endpoint; a small
+  usbdi-like layer when the second USB class driver (mass storage) comes.
+- HID report descriptors (non-boot keyboards, mice), key repeat, layouts.
+- Interrupt remapping (VT-d) so MSI and I/O APIC messages can target
+  APIC ids above 255; legacy INTx would need ACPI `_PRT` (AML).
 - Kernel log in memory (`dmesg`) for machines without serial; a
   framebuffer panic screen.
 
@@ -85,11 +88,14 @@ and per-milestone tests: [plan-stage1.md](plan-stage1.md).
 - **Uniprocessor.** The other CPUs (4 in the tests, 24 on the target) stay
   parked in firmware; "interrupts off" is the scheduler lock; Rust state
   sits behind a Giant lock.
-- **Input on the target PC**: no PS/2 controller and possibly no COM port,
-  so the monitor is output-only there until the stage-2 USB keyboard.
-- **I/O APIC destinations are 8-bit** (xAPIC format): fine for the BSP on
-  QEMU and the target (BSP id 0), not for ids above 254 without VT-d
-  interrupt remapping.
+- **Input on the target PC**: only a USB keyboard on a root port works
+  (no hubs, no hot-plug, boot protocol only); untested on the real board.
+- **xHCI**: one keyboard; other USB devices are addressed but unused; DMA
+  needs a 64-bit capable controller (every current Intel one is); PCI
+  segment 0 only; firmware's bus numbers and BAR assignments are trusted.
+- **I/O APIC and MSI destinations are 8-bit** (xAPIC format): fine for the
+  BSP on QEMU and the target (BSP id 0), not for ids above 254 without
+  VT-d interrupt remapping.
 - **Immutable image limits**: the PML4 and the direct map's own page
   tables stay writable; a kernel write primitive could re-point PML4[511]
   or edit the direct-map PTEs of the image's read-only alias (remapping

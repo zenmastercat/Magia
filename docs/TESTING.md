@@ -8,11 +8,11 @@ nix-shell --run 'make test'
 
 `make test` = `make cargo-test` + `make ktest`. It exits non-zero if any
 part fails. Logs of the QEMU runs are kept in `build/*.log`. On the
-development PC the whole run takes about 25 seconds.
+development PC the whole run takes about 35 seconds.
 
 ## 1. Host tests of the Rust code (`make cargo-test`)
 
-`cd rust && cargo test --target x86_64-unknown-linux-gnu` (153 tests)
+`cd rust && cargo test --target x86_64-unknown-linux-gnu` (159 tests)
 
 The Rust crate is `no_std` in the kernel but builds with `std` under
 `cfg(test)`. Kernel services (clock, console, user memory, sleeping,
@@ -38,11 +38,22 @@ FADT and RSDT, and 4000 random mutations of the whole machine (with and
 without repaired checksums) plus every truncation of every table: the
 parser must never panic.
 
+**USB parsers** (`rust/src/usb.rs`, 6 tests): QEMU's usb-kbd device and
+configuration descriptors; errors (empty, short, wrong length or type,
+bad max packet size); evil configuration walks (zero-length descriptor,
+descriptors running past the end, wTotalLength larger or smaller than
+the data, OUT/bulk/mouse endpoints only, an endpoint before the
+keyboard interface); boot reports (new keys only, keys moving between
+slots, Shift/Ctrl/Caps Lock, ErrorRollOver ignored without changing
+state, short and long reports, a full output buffer); 5000 random
+buffers through every parser.
+
 ## 2. QEMU runs (`make ktest`)
 
 `make ktest` builds `build/magia.img` and runs `tests/run-ktest.sh`,
 which boots the image through `tests/qemu.sh`: QEMU `q35`, `-cpu max`,
-TCG, `-smp 4 -m 8G`, OVMF (UEFI) firmware, the disk opened with
+TCG, `-smp 4 -m 8G`, OVMF (UEFI) firmware, `-device qemu-xhci -device
+usb-kbd` (`QEMU_USB=kbd`; `xhci` for the controller only, `none`), the disk opened with
 `snapshot=on` (never written), serial on stdio, `isa-debug-exit` at port
 0xf4, a 180 s timeout per boot. The kernel command line for each run is
 passed to Limine as an SMBIOS type 11 OEM string
@@ -52,7 +63,8 @@ serves every run. The runs:
 | run | command line / machine | checks |
 |---|---|---|
 | ktest | `ktest` | all in-kernel tests (below) |
-| monitor | (none); HMP socket | 7 commands typed over serial, `echo kbd-OK` typed on the PS/2 keyboard with QEMU `sendkey` (`tests/hmp.py`), `poweroff` |
+| monitor | (none); HMP socket; xHCI without usb-kbd | 8 commands typed over serial (including `lspci`, which must list the xHCI), `echo kbd-OK` typed on the PS/2 keyboard with QEMU `sendkey` (`tests/hmp.py`), `poweroff` |
+| usbkbd | (none); HMP socket; xHCI + usb-kbd | `echo usb-OK` typed with `sendkey`, which QEMU routes to the USB keyboard when one exists: the command must run, `usb` must show HID reports and MSI-X |
 | crash x3 | `ktest crash=stackprot`, `crash=canary`, `crash=wx` | must panic with the expected message and exit status 7 |
 | bigmem | `ktest nox2apic`, `-m 32G` | all RAM managed (about 32 GiB), xAPIC MMIO path; falls back to 24G/16G and says so if QEMU cannot allocate 32G |
 | bios | `ktest`, SeaBIOS instead of OVMF | the same image boots through Limine's BIOS stages |
@@ -73,6 +85,8 @@ linker-set idea) and run in key order, each in a fresh process:
 | 03x | `t_console.c` | framebuffer: a probe line's glyph pixels read back and compared with the Spleen bitmaps; scancode translation (every byte value, every state) |
 | 04x | `t_rng.c` | ChaCha20 known answers (RFC 8439 A.1 #1 and 2.3.2, a two-block vector; cross-checked with `openssl enc -chacha20`), non-repeating output, bit balance, buffer bounds, reseed counter, random guard and canaries, `arc4random_uniform` range, `kern.random.weak` |
 | 05x | `t_intr.c` | interrupt controller mode (APIC or noapic, x2APIC and TSC deadline when the CPU has them), ticking at HZ, TSC vs HPET calibration, COM1 routed through the I/O APIC (redirection entry checked, then a real IRQ from a UART loopback byte) |
+| 06x | `t_pci.c` | ECAM enumeration of q35 (host bridge, LPC, xHCI), bounded config reads; BAR decode/size of the xHCI (64-bit, 16 KiB, restored); capability walk on a fake config space in RAM (loops, pointers into the header, unaligned, 48-entry chain, MSI-X table outside its BAR refused without leaking a vector); the programmed MSI-X entry |
+| 07x | `t_usb.c` | xHCI running on MSI-X, a No Op command completed through the interrupt; QEMU usb-kbd attached (0627:0001, EP 0x81); the Rust USB parsers refuse garbage through the C interface |
 | 1xx | `t_mm.c` | buddy alloc/free/merge, kmalloc stress, alignment, W^X, NX, SMEP, SMAP, NULL faults, page-table W+X scan, copyin/copyout negatives, fault fixup; 121: frames above 4 GiB allocated and touched; 122: bootloader memory reclaimed, all RAM managed; 130-132: the immutable kernel image (remaps of the kernel window and of the image's direct-map alias refused with `-EPERM`, direct PTE/PDE/PDPTE writes fault); 133: MMIO mappings refuse RAM |
 | 2xx | `t_sched.c` | threads, sleep timeouts, no lost wakeups, timer preemption, EEVDF weights, yield, thread reaping |
 | 3xx-8xx | `sys_*.c` | the system call layer: Capsicum, jails, VFS/pipes, kqueue, rings/futex, sysctl |

@@ -88,3 +88,21 @@ OVMF and `-device qemu-xhci -device usb-kbd`.
   driver: out of scope, recorded as a gap; root-port keyboards work.
 - `sendkey` goes to the most recently activated QEMU keyboard; runs that
   test PS/2 boot without usb-kbd.
+
+## Result (stage 2 done)
+
+All milestones are in and `make test` passes from a fresh clone: 159
+host tests; 102 ktests in each of the OVMF, 32 GiB, SeaBIOS, noapic and
+KVM boots; the serial + PS/2 monitor run, the USB-keyboard monitor run,
+the crash runs. Deviations:
+
+- Milestones 3 and 4 are one commit: device enumeration and keyboard
+  setup are one code path in `xhci.c`.
+- The real-PC claim is untested: everything runs on QEMU's `qemu-xhci`
+  (USB 2 keyboard on a high-speed root port, MSI-X). The Intel-specific
+  parts (BIOS hand-off, port routing, scratchpads, 64-byte contexts) are
+  implemented from the spec and OpenBSD but never exercised by QEMU.
+- `SET_PROTOCOL` and `SET_IDLE` failures are tolerated (boot keyboards
+  start in the boot protocol; some stall SET_IDLE).
+- MSI and MSI-X work in `noapic` mode too (the LAPIC stays enabled as a
+  virtual wire), so the USB keyboard does not depend on the I/O APIC.

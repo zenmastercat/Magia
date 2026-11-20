@@ -73,6 +73,22 @@ FreeBSD and OpenBSD seed the stack-protector guard from their kernel RNG
 early in boot; Magia does the same before `kmain`, and also draws the
 per-boot thread-stack bottom marker from it (a fixed constant in 0.1).
 
+### PCIe over ECAM, MSI-X only (built, stage 2)
+FreeBSD `sys/dev/pci` is the model (scan bus 0, follow bridges, size BARs
+with decoding off); the walk is written natively from the PCI and PCIe
+specifications because Magia needs a few hundred lines of it. Using only
+MSI/MSI-X avoids interpreting AML for INTx routing, as the porting map
+suggested.
+
+### xHCI and the HID boot keyboard (built, stage 2)
+OpenBSD's xhci(4) (Martin Pieuchot) for the register definitions (taken
+verbatim) and the bring-up and ring code (adapted); OpenBSD/NetBSD
+ukbd/hidkbd for the report rule (a key is new if it was not in the
+previous report; ErrorRollOver means "ignore this report"). The boot
+protocol avoids a HID report-descriptor parser. Linux's idea of one input
+core for every keyboard (evdev) appears in miniature: PS/2, USB and serial
+all feed the same console input ring.
+
 ### btrfs-shaped storage interfaces (roadmap)
 btrfs is the stage-4 file system, written from the public on-disk format
 documentation (not from Linux, GRUB, U-Boot or WinBtrfs code). What it
