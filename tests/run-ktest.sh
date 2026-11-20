@@ -11,6 +11,8 @@
 #   2. monitor: boot normally, type commands at the magia> prompt over the
 #               serial line and one over the PS/2 keyboard (QEMU sendkey via
 #               tests/hmp.py), check their output, "poweroff".
+#   2b. usbkbd: the same with QEMU's xHCI + usb-kbd: a command typed on the
+#               USB keyboard (QEMU sendkey) must run.
 #   3. crash:   negative tests of the hardening - each boot must panic with
 #               a specific message (stack protector, thread stack canary,
 #               write to kernel text).
@@ -118,6 +120,44 @@ if [ $mfail -ne 0 ]; then
 	fail=1
 else
 	echo "   monitor: 8 commands over serial, 1 over the PS/2 keyboard, poweroff exit status 33"
+fi
+
+# ---------------------------------------------------------------- 2b. USB keyboard
+# The target PC has no PS/2: type at magia> through QEMU's usb-kbd behind
+# the xHCI (sendkey goes to the USB keyboard when one is present), then
+# check the command ran and the USB report counter moved.
+log="$LOGDIR/monitor-usb.log"
+echo "== usbkbd: typing at magia> through the xHCI USB keyboard"
+: >"$log"
+rm -f "$sock"
+{
+	i=0
+	while ! grep -q 'magia> ' "$log" 2>/dev/null; do
+		sleep 0.2
+		i=$((i + 1))
+		[ $i -gt 600 ] && break
+	done
+	python3 -I "$HERE/hmp.py" "$sock" 'type:echo usb-OK\n' >/dev/null
+	sleep 1
+	printf 'usb\r'
+	sleep 0.5
+	printf 'poweroff\r'
+	sleep 0.3
+} | QEMU_USB=kbd MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
+st=$?
+rm -f "$sock"
+clean=$(tr -d '\r' <"$log")
+ufail=0
+printf '%s\n' "$clean" | grep -qx 'usb-OK' || { echo "   the command typed on the USB keyboard did not run"; ufail=1; }
+reports=$(printf '%s\n' "$clean" | sed -n 's/^keyboard: 0627:0001 .*, \([0-9]*\) reports.*/\1/p' | tail -1)
+[ "${reports:-0}" -gt 0 ] || { echo "   no USB keyboard reports counted"; ufail=1; }
+printf '%s\n' "$clean" | grep -q 'MSI-X vector' || { echo "   xHCI not on MSI-X"; ufail=1; }
+[ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; ufail=1; }
+if [ $ufail -ne 0 ]; then
+	echo "FAIL: USB keyboard test (see $log)"
+	fail=1
+else
+	echo "   usbkbd: 'echo usb-OK' typed on the USB keyboard ran; $reports HID reports over MSI-X"
 fi
 
 # ---------------------------------------------------------------- 3. crash (results)

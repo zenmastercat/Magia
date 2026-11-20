@@ -44,6 +44,7 @@ pub mod syscall;
 pub mod sysctl;
 pub mod uaccess;
 pub mod uring;
+pub mod usb;
 pub mod vfs;
 
 #[cfg(not(test))]

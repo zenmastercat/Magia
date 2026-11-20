@@ -228,3 +228,96 @@ pub extern "C" fn rs_acpi_parse(rsdp_pa: u64, bios: i32, out: *mut crate::acpi::
         Err(e) => -e.code(),
     }
 }
+
+// ---- USB (rust/src/usb.rs; C side kernel/xhci.c, include/magia/usb.h) ----
+
+#[repr(C)]
+pub struct CUsbDev {
+    usb_version: u16,
+    vendor: u16,
+    product: u16,
+    class: u8,
+    subclass: u8,
+    protocol: u8,
+    max_packet0: u8,
+    num_configs: u8,
+    _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct CUsbBootKbd {
+    config_value: u8,
+    interface: u8,
+    alt_setting: u8,
+    ep_addr: u8,
+    ep_max_packet: u16,
+    ep_interval: u8,
+    _pad: u8,
+}
+
+/// The keyboard's report state; the xHCI interrupt handler is its only user.
+static USB_KBD: KLock<crate::usb::BootKbd> = KLock::new("usbkbd", crate::usb::BootKbd::new());
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_max_packet0(b: *const u8, n: usize) -> i32 {
+    crate::usb::max_packet0_from_prefix(bytes(b, n)).map_or(-1, i32::from)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_device_desc(b: *const u8, n: usize, out: *mut CUsbDev) -> i32 {
+    let Ok(d) = crate::usb::parse_device_desc(bytes(b, n)) else { return -1 };
+    if out.is_null() {
+        return -1;
+    }
+    // SAFETY: C passes a pointer to its struct rs_usb_dev.
+    unsafe {
+        *out = CUsbDev {
+            usb_version: d.usb_version,
+            vendor: d.vendor,
+            product: d.product,
+            class: d.class,
+            subclass: d.subclass,
+            protocol: d.protocol,
+            max_packet0: d.max_packet0,
+            num_configs: d.num_configs,
+            _pad: [0; 3],
+        };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_config_total(b: *const u8, n: usize) -> i32 {
+    crate::usb::config_total_length(bytes(b, n)).map_or(-1, i32::from)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_find_boot_kbd(b: *const u8, n: usize, out: *mut CUsbBootKbd) -> i32 {
+    let Ok(k) = crate::usb::find_boot_keyboard(bytes(b, n)) else { return -1 };
+    if out.is_null() {
+        return -1;
+    }
+    // SAFETY: C passes a pointer to its struct rs_usb_bootkbd.
+    unsafe {
+        *out = CUsbBootKbd {
+            config_value: k.config_value,
+            interface: k.interface,
+            alt_setting: k.alt_setting,
+            ep_addr: k.ep_addr,
+            ep_max_packet: k.ep_max_packet,
+            ep_interval: k.ep_interval,
+            _pad: 0,
+        };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_kbd_report(r: *const u8, n: usize, out: *mut u8, outlen: usize) -> usize {
+    if out.is_null() || outlen == 0 {
+        return 0;
+    }
+    // SAFETY: C passes (pointer, length) of its output buffer.
+    let out = unsafe { core::slice::from_raw_parts_mut(out, outlen) };
+    USB_KBD.lock().report(bytes(r, n), out)
+}
