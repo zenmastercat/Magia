@@ -11,6 +11,7 @@ header. Nothing here is GPL or CDDL; Linux is used for ideas only
 | File in Magia | Origin | Licence | Changes |
 |---|---|---|---|
 | `include/limine.h` | Limine boot protocol header, `limine-protocol/include/limine.h` from the Limine 12.10.0 release tarball (Mintsuki and contributors) | 0BSD | none (verbatim) |
+| `kernel/font/spleen8x16.h` | Spleen 8x16 font, OpenBSD `sys/dev/wsfont/spleen8x16.h` rev 1.7 (Frederic Cambus, 2018-2020); OpenBSD src commit 8e1a11b4 | BSD-2-Clause | none (verbatim); `kernel/fbcon.c` supplies the few `wsdisplay_font` declarations it expects |
 
 ## Fetched at build time (not in git)
 

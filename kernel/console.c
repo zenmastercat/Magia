@@ -1,13 +1,15 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /*
- * console.c - COM1 (16550 UART) console.
+ * console.c - COM1 (16550 UART) console and console input.
  *
  * Serial is the primary console (QEMU -nographic, the test harness and the
- * magia> monitor all use it). UEFI machines have no VGA text mode.
+ * magia> monitor all use it); output is copied to the framebuffer console
+ * (fbcon.c). Input comes from COM1 and the PS/2 keyboard (kbd.c).
  * Input arrives on IRQ4 into a small ring buffer; console_getc_wait()
  * sleeps until a byte is available.
  */
+#include <magia/fbcon.h>
 #include <magia/kernel.h>
 #include <magia/spinlock.h>
 #include <magia/thread.h>
@@ -33,6 +35,7 @@ static void putc_locked(char c)
 	if (c == '\n')
 		serial_putc('\r');
 	serial_putc(c);
+	fbcon_putc(c);
 }
 
 void console_init(void)
@@ -45,6 +48,7 @@ void console_init(void)
 	outb(COM1 + 2, 0xc7); /* FIFO on, clear, 14-byte threshold */
 	outb(COM1 + 4, 0x0b); /* DTR, RTS, OUT2 (IRQ line enable) */
 	serial_ok = inb(COM1 + 5) != 0xff;
+	fbcon_init();
 }
 
 void console_write(const char *s, size_t n)
@@ -52,11 +56,13 @@ void console_write(const char *s, size_t n)
 	if (panicking) {
 		for (size_t i = 0; i < n; i++)
 			putc_locked(s[i]);
+		fbcon_flush();
 		return;
 	}
 	spin_lock(&con_lock);
 	for (size_t i = 0; i < n; i++)
 		putc_locked(s[i]);
+	fbcon_flush();
 	spin_unlock(&con_lock);
 }
 
@@ -70,24 +76,28 @@ static volatile uint32_t rx_head, rx_tail;
 static volatile int rx_waiter = -1;
 volatile uint64_t console_rx_bytes;
 
+/* Called from IRQ handlers (COM1, PS/2 keyboard) with interrupts off. */
+void console_rx_push(uint8_t c)
+{
+	console_rx_bytes++;
+	if (rx_head - rx_tail < RX_SIZE)
+		rx_buf[rx_head++ % RX_SIZE] = c;
+	if (rx_waiter >= 0)
+		thread_wake(rx_waiter);
+}
+
 static void com1_irq(struct trapframe *tf)
 {
 	(void)tf;
-	while (inb(COM1 + 5) & 0x01) {
-		uint8_t c = inb(COM1);
-		console_rx_bytes++;
-		if (rx_head - rx_tail < RX_SIZE)
-			rx_buf[rx_head++ % RX_SIZE] = c;
-	}
-	if (rx_waiter >= 0)
-		thread_wake(rx_waiter);
+	while (inb(COM1 + 5) & 0x01)
+		console_rx_push(inb(COM1));
 }
 
 void console_input_init(void)
 {
 	irq_register(IRQ_COM1, com1_irq);
 	outb(COM1 + 1, 0x01); /* interrupt on received data */
-	pic_unmask(IRQ_COM1);
+	irq_enable(IRQ_COM1);
 }
 
 int console_getc(void)

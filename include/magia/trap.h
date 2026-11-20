@@ -16,11 +16,13 @@ struct trapframe {
 
 #define IRQ_BASE 32
 #define IRQ_TIMER 0
+#define IRQ_KBD   1
 #define IRQ_COM1  4
 #define T_SYSCALL 0x100 /* pseudo vector stored by the syscall stub */
 
 typedef void (*irq_handler_t)(struct trapframe *tf);
 void irq_register(int irq, irq_handler_t h);
+void irq_enable(int irq); /* unmask ISA IRQ `irq` (8259 or I/O APIC) */
 void trap_dispatch(struct trapframe *tf);
 void trap_dump(const struct trapframe *tf);
 

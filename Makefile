@@ -62,11 +62,13 @@ all: $(BUILD)/magia.elf
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	@echo "  CC      $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
-	$(CC) $(ASFLAGS) -c $< -o $@
+	@echo "  AS      $<"
+	@$(CC) $(ASFLAGS) -c $< -o $@
 
 $(RUST_LIB): $(RUST_SRCS)
 	cd rust && $(CARGO) build --release --target $(RUST_TARGET)

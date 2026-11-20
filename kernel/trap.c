@@ -72,6 +72,8 @@ void idt_init(void)
 
 void irq_register(int irq, irq_handler_t h) { irq_handlers[irq] = h; }
 
+void irq_enable(int irq) { pic_unmask(irq); }
+
 void trap_dump(const struct trapframe *tf)
 {
 	const char *name = tf->vector < 32 ? exc_names[tf->vector] : "irq";

@@ -9,7 +9,8 @@
 #   1. ktest:   boot with "ktest", run every in-kernel test, parse the
 #               KTEST SUMMARY line, require isa-debug-exit status 33.
 #   2. monitor: boot normally, type commands at the magia> prompt over the
-#               serial line, check their output, "poweroff".
+#               serial line and one over the PS/2 keyboard (QEMU sendkey via
+#               tests/hmp.py), check their output, "poweroff".
 #   3. crash:   negative tests of the hardening - each boot must panic with
 #               a specific message (stack protector, thread stack canary,
 #               write to kernel text).
@@ -30,7 +31,7 @@ qemu() {
 	cmd=$1
 	shift
 	timeout --foreground -k 5 "$TIMEOUT" sh "$HERE/qemu.sh" "$IMG" "$cmd" \
-		-display none -serial stdio -monitor none "$@"
+		-display none -serial stdio -monitor "${MONITOR:-none}" "$@"
 }
 
 # check_ktest <log> <qemu status> <label>
@@ -73,9 +74,13 @@ qemu "ktest" </dev/null >"$log" 2>&1
 check_ktest "$log" $? ktest
 
 # ---------------------------------------------------------------- 2. monitor
+# Commands typed over the serial line, then one over the PS/2 keyboard
+# (QEMU sendkey through the human monitor socket), then poweroff.
 log="$LOGDIR/monitor.log"
-echo "== monitor: driving the magia> prompt over serial"
+sock="$LOGDIR/monitor.sock"
+echo "== monitor: driving the magia> prompt over serial and the PS/2 keyboard"
 : >"$log"
+rm -f "$sock"
 {
 	i=0
 	while ! grep -q 'magia> ' "$log" 2>/dev/null; do
@@ -83,26 +88,35 @@ echo "== monitor: driving the magia> prompt over serial"
 		i=$((i + 1))
 		[ $i -gt 600 ] && break
 	done
-	for cmd in "uname" "sysctl kern.ostype" "ls /dev" "cat /etc/motd" "jails" "ps" "frobnicate" "poweroff"; do
-		printf '%s\r' "$cmd"
+	for cmd in "uname" "sysctl kern.ostype" "ls /dev" "cat /etc/motd" "jails" "ps" "frobnicate"; do
+		printf '%s' "$cmd"
 		sleep 0.3
 	done
-} | qemu "monitor" >"$log" 2>&1
+	python3 -I "$HERE/hmp.py" "$sock" 'type:echo kbd-OK\n' >/dev/null
+	sleep 1
+	printf 'poweroff'
+	sleep 0.3
+} | MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
 st=$?
-clean=$(tr -d '\r' <"$log")
+rm -f "$sock"
+clean=$(tr -d '' <"$log")
 mfail=0
-for want in "magia> uname" "Magia" "console" "unknown command 'frobnicate'" "poweroff: bye"; do
-	if ! printf '%s\n' "$clean" | grep -qF "$want"; then
+for want in "magia> uname" "Magia" "console" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye"; do
+	if ! printf '%s
+' "$clean" | grep -qF "$want"; then
 		echo "   missing in monitor output: $want"
 		mfail=1
 	fi
 done
+# the echo command's own output line, not just the echoed keystrokes
+printf '%s
+' "$clean" | grep -qx 'kbd-OK' || { echo "   keyboard command did not run"; mfail=1; }
 [ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; mfail=1; }
 if [ $mfail -ne 0 ]; then
 	echo "FAIL: monitor smoke test (see $log)"
 	fail=1
 else
-	echo "   monitor: 8 commands OK, poweroff exit status 33"
+	echo "   monitor: 7 commands over serial, 1 over the PS/2 keyboard, poweroff exit status 33"
 fi
 
 # ---------------------------------------------------------------- 3. crash (results)

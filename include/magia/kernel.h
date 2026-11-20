@@ -59,13 +59,14 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((forma
 void kprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void kvprintf(const char *fmt, va_list ap);
 
-/* console.c: writes go to COM1 and the VGA text console. */
+/* console.c: writes go to COM1 and the framebuffer console. */
 void console_init(void);
 void console_write(const char *s, size_t n);
 void console_putc(char c);
 void console_input_init(void);  /* enable the COM1 receive interrupt */
 int console_getc(void);         /* -1 if no input is pending */
 int console_getc_wait(void);    /* sleeps until a byte arrives */
+void console_rx_push(uint8_t c); /* input byte from an IRQ handler */
 
 /* panic.c */
 __noreturn void panic(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
