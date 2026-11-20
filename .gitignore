@@ -1,0 +1,7 @@
+/build/
+/rust/target/
+/graphify-out/
+*.o
+*.d
+*.log
+result
