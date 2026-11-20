@@ -9,7 +9,7 @@
 //! system call table and argument validation, VFS (ramfs, devfs, pipes),
 //! kqueue, io_uring-style rings, futex, the sysctl MIB tree and the EEVDF
 //! scheduling policy. See docs/LANGUAGES.md for why the line is drawn
-//! there. Everything here is written from scratch; ideas are credited in
+//! there. Everything here is written for Magia; ideas are credited in
 //! module comments and docs/IDEAS.md.
 
 #![cfg_attr(not(test), no_std)]

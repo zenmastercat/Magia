@@ -9,10 +9,14 @@ Magia is written in two languages on purpose. The rule is simple:
 
 | Area | Language | Files |
 |---|---|---|
-| Boot (multiboot, long mode, higher half) | GNU assembly | `arch/x86_64/boot.S` |
+| Boot entry from Limine (stack switch, stack guard) | GNU assembly | `arch/x86_64/boot.S` |
+| Limine requests and hand-off | C | `kernel/boot.c` |
 | Trap/IRQ entry, `syscall` entry, context switch, user-copy fixup | GNU assembly | `arch/x86_64/{isr,syscall,switch}.S` |
 | GDT/TSS/IDT, CPU features, NX/WP/SMEP/SMAP/UMIP | C | `kernel/cpu.c`, `kernel/trap.c` |
-| PIC, PIT, TSC, serial/VGA console | C | `kernel/{pic,timer,console}.c` |
+| PIC, PIT, LAPIC, I/O APIC, HPET, TSC | C | `kernel/{pic,timer,lapic,ioapic,hpet}.c` |
+| Serial and framebuffer consoles, PS/2 keyboard | C | `kernel/{console,fbcon,kbd,kbd_map}.c` |
+| ChaCha20 RNG | C | `kernel/rng.c` |
+| ACPI table parsing (firmware input) | Rust | `rust/src/acpi.rs` |
 | Buddy page allocator, page tables (W^X), kmalloc zones | C | `kernel/{pmm,vmm,kmem}.c` |
 | User windows, `copyin`/`copyout` (SMAP window + fault fixup) | C | `kernel/uvm.c` |
 | Threads, sleep/wakeup, preemption (mechanism) | C | `kernel/sched.c` |

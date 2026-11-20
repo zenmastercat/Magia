@@ -99,7 +99,7 @@ impl Vfs {
         let _ = tmp;
         let etc = v.mkdir(root, b"etc").unwrap();
         let motd = v.create(etc, b"motd").unwrap();
-        v.write(motd, 0, b"Welcome to Magia, an experimental kernel. Not derived from Linux or FreeBSD.\n")
+        v.write(motd, 0, b"Welcome to Magia, an experimental kernel. Linux ideas only; BSD code listed in THIRD_PARTY.md.\n")
             .unwrap();
         v
     }

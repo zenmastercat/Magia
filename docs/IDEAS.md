@@ -1,9 +1,13 @@
-# Ideas Magia takes from FreeBSD and Linux
+# Ideas Magia takes from FreeBSD, OpenBSD and Linux
 
-Magia merges *ideas*, never code. Every mechanism below was re-derived from
-public descriptions (manual pages, papers, documentation); no source file
-of FreeBSD or Linux was copied or translated. Numeric tables are recomputed
-from their formula (for example the nice-to-weight table, see EEVDF below).
+Up to 0.1 Magia merged *ideas* only. Since stage 1 it may also adapt
+**code** from FreeBSD and OpenBSD when the licence is BSD-2, BSD-3, ISC,
+MIT-style or public domain; those few files keep their headers and are
+listed in [THIRD_PARTY.md](THIRD_PARTY.md). **Linux stays ideas only**
+(GPL): every Linux-derived mechanism below was re-derived from public
+descriptions (documentation, papers, LWN), no Linux source was copied or
+translated. Numeric tables are recomputed from their formula (for example
+the nice-to-weight table, see EEVDF below).
 
 Two research notes back the choices:
 
@@ -18,6 +22,61 @@ Two research notes back the choices:
 
 Status: **built** = in the tree and tested; **partial** = simplified;
 **roadmap** = see ROADMAP.md.
+
+## Stage 1 (boot, hardware, hardening)
+
+### Limine boot protocol and KASLR (built)
+Limine (BSD-2 bootloader; its 0BSD protocol header is in the tree) loads
+the kernel as a static PIE and slides it; the higher-half direct map
+(HHDM) is randomised too, and Magia reuses it as its own direct map.
+KASLR as such is a Linux/OpenBSD/FreeBSD-wide idea; the symbol table keeps
+link-time addresses and lookups subtract the slide.
+
+### Static ACPI tables without ACPICA (built)
+FreeBSD uses ACPICA (a full AML interpreter); stage 1 needs only static
+tables, so Magia writes a small parser, in Rust because firmware tables
+are untrusted input. MADT semantics follow FreeBSD
+`sys/x86/acpica/madt.c` (only enabled CPUs count; interrupt source
+overrides are ISA, bus 0); OpenBSD `acpimadt.c`/`acpimcfg.c` (ISC) were
+the compact references. Code written from the ACPI 6.5 specification.
+
+### LAPIC, x2APIC, I/O APIC, TSC deadline (built)
+Design after FreeBSD `sys/x86/x86/local_apic.c` and `io_apic.c`: prefer
+x2APIC when present, calibrate the LAPIC timer against a reference clock,
+use the TSC-deadline timer when the CPU has it; register names adapted
+from FreeBSD `apicreg.h` (BSD-2, in THIRD_PARTY.md). The rest is written
+from the Intel SDM and the 82093AA and HPET specifications.
+
+### Framebuffer console with Spleen (built)
+OpenBSD's wscons rasops consoles use the Spleen fonts (Frederic Cambus,
+BSD-2); Magia includes `spleen8x16.h` verbatim. Redrawing only changed
+cells of a character grid is a common console technique (no code taken).
+
+### arc4random with fast key erasure (built)
+OpenBSD's arc4random(3) / FreeBSD's `libkern/arc4random.c` design:
+ChaCha20 keystream in a buffer, re-key from the keystream after every
+refill (fast key erasure, D. J. Bernstein's term), wipe what was handed
+out, reseed periodically; `arc4random_uniform` rejects biased values. The
+ChaCha20 core is DJB's public-domain code as carried by OpenBSD. Seeding
+each source through its own re-key (so none can cancel another) follows
+the usual "mix through the cipher, never XOR sources together" advice.
+
+### Immutable mappings: mimmutable (built, kernel image only)
+OpenBSD 7.3's `mimmutable(2)` marks mappings that may never change
+permissions or be replaced. Magia applies the idea to its own image: after
+boot the kernel window cannot be remapped (`-EPERM`) and its page-table
+pages are read-only. Stage 3 extends it to user text and stacks, together
+with OpenBSD's `pinsyscalls` (see ROADMAP.md).
+
+### Stack canaries from the kernel RNG (built)
+FreeBSD and OpenBSD seed the stack-protector guard from their kernel RNG
+early in boot; Magia does the same before `kmain`, and also draws the
+per-boot thread-stack bottom marker from it (a fixed constant in 0.1).
+
+### btrfs-shaped storage interfaces (roadmap)
+btrfs is the stage-4 file system, written from the public on-disk format
+documentation (not from Linux, GRUB, U-Boot or WinBtrfs code). What it
+implies for the block layer and VFS is in ARCHITECTURE.md.
 
 ## From FreeBSD
 

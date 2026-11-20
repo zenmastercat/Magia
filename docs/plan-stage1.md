@@ -94,3 +94,31 @@ no btrfs code is written in stage 1.
   and test both (KVM run when available).
 - Real hardware (Core Ultra 9 285K): no PS/2 keyboard and maybe no COM
   port; keyboard needs xHCI + HID (stage 2). Recorded in ROADMAP.
+
+## Result (stage 1 done)
+
+All seven milestones are in, each in its own commit, and `make test`
+passes from a fresh clone (153 host tests; 91 ktests in each of the
+OVMF, 32 GiB, SeaBIOS, noapic and KVM boots; monitor and crash runs).
+Deviations from the text above, and why:
+
+- Milestone 3 (ACPI) was committed before milestone 2 (console); the
+  content of each matches the plan.
+- QEMU runs use the `q35` machine (it has MCFG/ECAM like a real PC); the
+  32 GiB run boots with `nox2apic` so the xAPIC MMIO path is tested too.
+- The RSDP 16-byte alignment check applies only to the BIOS scan: under
+  UEFI the RSDP comes from the EFI configuration table and OVMF places it
+  at an address ending in ...14 (ACPI has no alignment rule there).
+- FreeBSD's `apicreg.h` is BSD-2-Clause (SPDX header), not BSD-3 as noted
+  above.
+- TCG offers x2APIC but no TSC-deadline timer: TCG runs test the periodic
+  LAPIC timer, the KVM run (`-cpu host` on the Core Ultra 9 285K) tests
+  x2APIC + TSC deadline.
+- The immutable range is the whole kernel window (PML4 slot 511: text,
+  rodata, data, bss), not only text/rodata: refusing the whole slot keeps
+  every table under it read-only without exceptions.
+- GNU ld marks a PIE with a fixed non-zero base `ET_EXEC`; after checking
+  the image (RELATIVE relocations only, no TEXTREL, no W+X segment)
+  `scripts/fix-pie.sh` sets `ET_DYN`, which Limine requires to relocate.
+- The image also has a 1 MiB BIOS boot partition (GPT), which Limine's
+  `bios-install` needs for its stage 2.

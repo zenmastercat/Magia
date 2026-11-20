@@ -79,11 +79,13 @@ void boot_early(void)
 	if (mm->entry_count > BOOT_MMAP_MAX)
 		early_fail("memory map has too many entries\r\n");
 	for (uint64_t i = 0; i < mm->entry_count; i++) {
-		bi->mmap[i].base = mm->entries[i]->base;
-		bi->mmap[i].length = mm->entries[i]->length;
-		bi->mmap[i].type = mm->entries[i]->type;
+		const struct limine_memmap_entry *e = mm->entries[i];
+		/* firmware data: drop entries that wrap or lie above the 52-bit
+		 * physical address limit instead of trusting them */
+		if (e->length == 0 || e->base + e->length < e->base || e->base + e->length > (1ULL << 52))
+			continue;
+		bi->mmap[bi->nmmap++] = (struct boot_mmap_entry){ e->base, e->length, e->type };
 	}
-	bi->nmmap = mm->entry_count;
 
 	if (cmdline_req.response && cmdline_req.response->cmdline)
 		strlcpy(bi->cmdline, cmdline_req.response->cmdline, sizeof(bi->cmdline));
@@ -95,7 +97,8 @@ void boot_early(void)
 	}
 	if (fb_req.response && fb_req.response->framebuffer_count > 0) {
 		const struct limine_framebuffer *f = fb_req.response->framebuffers[0];
-		if (f->memory_model == LIMINE_FRAMEBUFFER_RGB && f->bpp == 32) {
+		if (f->memory_model == LIMINE_FRAMEBUFFER_RGB && f->bpp == 32 && f->width && f->height &&
+		    f->width <= 16384 && f->height <= 16384 && f->pitch >= f->width * 4 && f->pitch <= 65536) {
 			bi->fb = (struct boot_fb){
 				.pa = (uint64_t)f->address - dmap_base,
 				.width = f->width, .height = f->height, .pitch = f->pitch, .bpp = f->bpp,
