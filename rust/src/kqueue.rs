@@ -41,6 +41,14 @@ pub struct Knote {
     pub last: Option<i64>,
 }
 
+/// Most notes one kqueue may hold (security review F2): every note is kernel
+/// heap that is not charged to a jail, so the count is bounded.
+pub const KQ_NOTES_MAX: usize = 1024;
+
+/// Largest ident accepted for EVFILT_TIMER and EVFILT_USER notes (these
+/// idents name nothing in the kernel; keep them small, like descriptors).
+pub const KQ_IDENT_MAX: u64 = i32::MAX as u64;
+
 #[derive(Default)]
 pub struct Kqueue {
     pub notes: Vec<Knote>,
@@ -179,6 +187,9 @@ impl Kernel {
                 }
             }
             EVFILT_TIMER => {
+                if ch.ident > KQ_IDENT_MAX {
+                    return Err(EINVAL);
+                }
                 if ch.data <= 0 || ch.data > 86_400_000 {
                     return Err(EINVAL);
                 }
@@ -188,6 +199,9 @@ impl Kernel {
                 }
             }
             EVFILT_USER => {
+                if ch.ident > KQ_IDENT_MAX {
+                    return Err(EINVAL);
+                }
                 note.fired = ch.fflags & NOTE_TRIGGER != 0;
             }
             _ => return Err(EINVAL),
@@ -203,7 +217,12 @@ impl Kernel {
                 }
                 kq.notes[i] = note;
             }
-            None => kq.notes.push(note),
+            None => {
+                if kq.notes.len() >= KQ_NOTES_MAX {
+                    return Err(ENOMEM);
+                }
+                kq.notes.push(note)
+            }
         }
         self.arm_timer(at);
         self.wake(WaitKey::Kevent);
@@ -512,6 +531,35 @@ mod tests {
         assert_eq!(sys(&mut k, pid, SYS_KEVENT, &[kq as u64, p, 0, p, 1, (-2i64) as u64]), -EINVAL as i64);
         assert_eq!(sys(&mut k, pid, SYS_KEVENT, &[1, 0, 0, p, 1, 0]), -EBADF as i64, "not a kqueue");
         assert_eq!(sys(&mut k, pid, SYS_KEVENT, &[kq as u64, 0, 1, p, 1, 0]), -EFAULT as i64);
+    }
+
+    #[test]
+    fn notes_are_capped_and_idents_validated() {
+        let (mut k, pid) = kernel_with_proc();
+        let kq = sys(&mut k, pid, SYS_KQUEUE, &[]);
+        // fill the kqueue with USER notes, 64 changes per call
+        let mut added = 0u64;
+        while added < super::KQ_NOTES_MAX as u64 {
+            let ch: Vec<KEvent> = (0..64).map(|i| kev(added + i, EVFILT_USER, EV_ADD, 0, 0)).collect();
+            assert_eq!(kevent(&mut k, pid, kq, &ch, 0, 0).0, 0);
+            added += 64;
+        }
+        assert_eq!(k.kqs.values().next().unwrap().notes.len(), super::KQ_NOTES_MAX);
+        // one more distinct note: ENOMEM (reported as an EV_ERROR event)
+        let (n, ev) = kevent(&mut k, pid, kq, &[kev(5000, EVFILT_TIMER, EV_ADD, 0, 10)], 1, 0);
+        assert_eq!((n, ev[0].flags & EV_ERROR != 0, ev[0].data), (1, true, ENOMEM as i64));
+        // updating an existing note still works at the cap
+        assert_eq!(kevent(&mut k, pid, kq, &[kev(3, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0)], 0, 0).0, 0);
+        // deleting frees a slot
+        assert_eq!(kevent(&mut k, pid, kq, &[kev(3, EVFILT_USER, EV_DELETE, 0, 0)], 0, 0).0, 0);
+        assert_eq!(kevent(&mut k, pid, kq, &[kev(5000, EVFILT_USER, EV_ADD, 0, 0)], 0, 0).0, 0);
+        // idents for TIMER/USER must be small
+        let kq2 = sys(&mut k, pid, SYS_KQUEUE, &[]);
+        let big = super::KQ_IDENT_MAX + 1;
+        for f in [EVFILT_USER, EVFILT_TIMER] {
+            let (n, ev) = kevent(&mut k, pid, kq2, &[kev(big, f, EV_ADD, 0, 10)], 1, 0);
+            assert_eq!((n, ev[0].data), (1, EINVAL as i64));
+        }
     }
 
     #[test]

@@ -2,7 +2,9 @@
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /*
  * Magia kernel linker script.
- *  - .boot* sections run at their physical address (1 MiB), before paging.
+ *  - .boot* sections run at their physical address (1 MiB), before paging;
+ *    code (R+X) and data (R+W) get separate program headers, so no
+ *    segment in the ELF is RWX.
  *  - everything else is linked at KERNEL_VMA + physical (higher half).
  *  - each output section starts on a page boundary so vmm.c can apply
  *    W^X permissions per section (text RX, rodata R, data/bss RW+NX).
@@ -16,7 +18,8 @@ KERNEL_VMA = 0xffffffff80000000;
 
 PHDRS
 {
-	boot   PT_LOAD FLAGS(7);
+	boottext PT_LOAD FLAGS(5); /* R+X: multiboot header, 32-bit entry  */
+	bootdata PT_LOAD FLAGS(6); /* R+W: boot page tables, boot stack    */
 	text   PT_LOAD FLAGS(5);
 	rodata PT_LOAD FLAGS(4);
 	data   PT_LOAD FLAGS(6);
@@ -29,8 +32,12 @@ SECTIONS
 	.boot : {
 		KEEP(*(.multiboot))
 		*(.boot.text)
+	} :boottext
+
+	. = ALIGN(4096);
+	.bootdata : {
 		*(.boot.data)
-	} :boot
+	} :bootdata
 
 	. = ALIGN(4096);
 	. += KERNEL_VMA;

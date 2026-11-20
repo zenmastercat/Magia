@@ -51,6 +51,17 @@ syscall_entry:
 	sti
 	call syscall_c
 	cli
+	/*
+	 * sysretq with a non-canonical rcx faults in ring 0 *after* the
+	 * stack/GS state is already the user's on some CPUs. The rip we
+	 * return to must be a user address (bits 63:47 clear); it always is
+	 * today (the CPU put it there), but if a future change ever lets the
+	 * kernel modify tf->rip, refuse to sysret: syscall_bad_return() kills
+	 * the process instead (exit status 128 + 13).
+	 */
+	movq 136(%rsp), %rcx		/* tf->rip */
+	shrq $47, %rcx
+	jnz 3f
 	popq %r15
 	popq %r14
 	popq %r13
@@ -73,6 +84,10 @@ syscall_entry:
 	popq %rsp			/* user rsp    */
 	swapgs
 	sysretq
+3:	sti
+	movq %rsp, %rdi
+	call syscall_bad_return		/* does not return */
+	ud2
 
 /*
  * __noreturn void enter_user(rip, rsp, a0, a1, a2)

@@ -151,3 +151,29 @@ KTEST(604, kqueue_change_errors)
 	struct kevent u = ev(1, EVFILT_USER, EV_ADD, 0, 0);
 	KT_EQ(kq_run(&q, &u, 1, out, 0), KT_NEG(ENOTCAPABLE));
 }
+
+/* Security review F2: a kqueue holds at most 1024 notes (kernel heap that
+ * no jail is charged for), and TIMER/USER idents must fit in 31 bits. */
+KTEST(605, kqueue_note_count_is_bounded)
+{
+	struct kq q;
+	struct kevent out[KQ_MAX];
+	static struct kevent batch[64];
+	kq_open(&q);
+	for (uint64_t base = 0; base < 1024; base += 64) {
+		for (int i = 0; i < 64; i++)
+			batch[i] = ev(base + (uint64_t)i, EVFILT_USER, EV_ADD, 0, 0);
+		KT_EQ(kq_run(&q, batch, 64, out, 0), 0);
+	}
+	struct kevent extra = ev(5000, EVFILT_USER, EV_ADD, 0, 0);
+	KT_EQ(kq_run(&q, &extra, 1, out, 0), 1);
+	KT_ASSERT(out[0].flags & EV_ERROR);
+	KT_EQ(out[0].data, ENOMEM);
+	struct kevent del = ev(7, EVFILT_USER, EV_DELETE, 0, 0);
+	KT_EQ(kq_run(&q, &del, 1, out, 0), 0);
+	KT_EQ(kq_run(&q, &extra, 1, out, 0), 0); /* a freed slot can be reused */
+	struct kevent big = ev(1ULL << 40, EVFILT_TIMER, EV_ADD, 0, 10);
+	KT_EQ(kq_run(&q, &big, 1, out, 0), 1);
+	KT_EQ(out[0].data, EINVAL);
+	KT_EQ(ksys1(SYS_close, q.fd), 0); /* frees all notes */
+}

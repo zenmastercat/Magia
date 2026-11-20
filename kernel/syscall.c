@@ -16,6 +16,7 @@
 
 void syscall_entry(void);
 void syscall_c(struct trapframe *tf);
+__noreturn void syscall_bad_return(struct trapframe *tf);
 
 volatile uint64_t syscall_count;
 SYSCTL_U64_RO(kern_syscalls, "kern.syscalls", &syscall_count, "system calls since boot");
@@ -45,6 +46,18 @@ void syscall_c(struct trapframe *tf)
 	uint64_t args[6] = { tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9 };
 	tf->rax = (uint64_t)rs_syscall(t->pid, tf->rax, args);
 	maybe_exit(t);
+}
+
+/* From syscall.S when the return rip is not a canonical user address. */
+void syscall_bad_return(struct trapframe *tf)
+{
+	struct thread *t = curthread();
+	kprintf("magia: pid %d: refusing sysret to non-canonical rip %p, killing the process\n", t->pid,
+		(void *)tf->rip);
+	uint64_t args[6] = { 128 + 13, 0, 0, 0, 0, 0 };
+	if (t->pid > 0)
+		rs_syscall(t->pid, SYS_exit, args);
+	thread_exit(128 + 13);
 }
 
 /* Kernel threads acting as processes (ktest) enter the same dispatcher. */

@@ -17,8 +17,10 @@
 //! reads sq_tail once per call, reads every index once, copies every SQE
 //! to a local before validating it, and bounds every index with the mask.
 //!
-//! Attack-surface controls (rings were behind 60% of the kernel exploits
-//! submitted to Google's kCTF in 2023): only four ops (NOP, READ, WRITE,
+//! Attack-surface controls (Google reported that 60% of the Linux kernel
+//! exploits submitted to its kCTF VRP used io_uring - "Learnings from kCTF
+//! VRP's 42 Linux kernel exploits submissions", Google Security Blog,
+//! 2023-06-14): only four ops (NOP, READ, WRITE,
 //! TIMEOUT); READ/WRITE call the *same* `io_read`/`io_write` path as
 //! read(2)/write(2), so Capsicum rights and user-pointer checks are shared;
 //! a global kill switch (sysctl kern.ring.enable) and a per-jail
@@ -214,8 +216,14 @@ impl Kernel {
                 if sqe.off > 86_400_000 {
                     return Some(-EINVAL);
                 }
+                // Bound kernel memory: at most `entries` pending timeouts per
+                // ring (security review F1); the rest complete with -EAGAIN.
+                let ring = self.rings.get_mut(&id).unwrap();
+                if ring.timeouts.len() >= ring.entries as usize {
+                    return Some(-EAGAIN);
+                }
                 let due = kenv::now_ms() + sqe.off;
-                self.rings.get_mut(&id).unwrap().timeouts.push((due, sqe.user_data));
+                ring.timeouts.push((due, sqe.user_data));
                 self.arm_timer(due);
                 None // completes later
             }
@@ -463,6 +471,31 @@ mod tests {
         k.timer_tick(kenv::now_ms());
         c.retry = 1;
         assert_eq!(ret_val(call_ctx(&mut k, &mut c, SYS_URING_ENTER, &[u.fd as u64, 1, 1, 0])), 1);
+    }
+
+    #[test]
+    fn pending_timeouts_are_capped_at_ring_entries() {
+        let (mut k, pid) = kernel_with_proc();
+        let u = setup(&mut k, pid, 4);
+        // 4 long timeouts fill the per-ring budget...
+        let long: Vec<UringSqe> = (0..4).map(|i| sqe(URING_OP_TIMEOUT, 0, 86_400_000, 0, 0, i)).collect();
+        push(&u, &long);
+        assert_eq!(sys(&mut k, pid, SYS_URING_ENTER, &[u.fd as u64, 4, 0, 0]), 4);
+        assert!(cqes(&u).is_empty());
+        assert_eq!(k.rings.values().next().unwrap().timeouts.len(), 4);
+        // ...every further TIMEOUT completes at once with -EAGAIN, nothing queued
+        for round in 0..3u64 {
+            let more: Vec<UringSqe> = (0..4).map(|i| sqe(URING_OP_TIMEOUT, 0, 86_400_000, 0, 0, 100 + 4 * round + i)).collect();
+            push(&u, &more);
+            assert_eq!(sys(&mut k, pid, SYS_URING_ENTER, &[u.fd as u64, 4, 0, 0]), 4);
+            let res: Vec<i32> = cqes(&u).iter().map(|c| c.res).collect();
+            assert_eq!(res, [-EAGAIN; 4]);
+        }
+        assert_eq!(k.rings.values().next().unwrap().timeouts.len(), 4);
+        // other ops still work while the timeout budget is full
+        push(&u, &[sqe(URING_OP_NOP, 0, 0, 0, 0, 9)]);
+        assert_eq!(sys(&mut k, pid, SYS_URING_ENTER, &[u.fd as u64, 1, 1, 0]), 1);
+        assert_eq!(cqes(&u)[0].res, 0);
     }
 
     #[test]
