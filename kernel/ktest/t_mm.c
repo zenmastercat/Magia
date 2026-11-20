@@ -355,3 +355,61 @@ KTEST(122, pmm_reclaims_bootloader_memory)
 	/* the direct map reaches the top of RAM */
 	KT_ASSERT(vmm_translate((uint64_t)phys_to_virt(pmm_max_phys() - PAGE_SIZE), NULL, NULL));
 }
+
+/* Immutable kernel image: after boot the kernel window's mappings cannot
+ * be changed through the VM interface... */
+KTEST(130, kernel_image_remap_is_refused)
+{
+	extern char __text_start[], __rodata_start[], __data_start[];
+	KT_ASSERT(vmm_kernel_locked());
+	uint64_t text = (uint64_t)__text_start, ro = (uint64_t)__rodata_start, data = (uint64_t)__data_start;
+	uint64_t pa0 = 0, fl0 = 0, pa1 = 0, fl1 = 0;
+	KT_ASSERT(vmm_translate(text, &pa0, &fl0));
+	uint64_t spare = pmm_alloc(0);
+	KT_EQ(vmm_map(text, spare, PTE_G), -EPERM);              /* replace code */
+	KT_EQ(vmm_map(ro, spare, PTE_G | PTE_NX), -EPERM);
+	KT_EQ(vmm_protect(ro, PTE_W | PTE_NX | PTE_G), -EPERM);  /* make rodata writable */
+	KT_EQ(vmm_protect(text, PTE_G | PTE_NX), -EPERM);
+	KT_EQ(vmm_unmap(data, NULL), -EPERM);
+	KT_EQ(vmm_map(KERNEL_VMA - PAGE_SIZE, spare, PTE_W | PTE_NX), -EPERM); /* new page in the window */
+	KT_ASSERT(vmm_translate(text, &pa1, &fl1));
+	KT_EQ(pa1, pa0);
+	KT_EQ(fl1, fl0);
+	/* the rest of the address space still works: a user window maps and unmaps */
+	uint64_t uva = 0;
+	KT_EQ(uvm_alloc(0, 1, 0, &uva, NULL), 0);
+	KT_EQ(vmm_protect(uva, PTE_U | PTE_NX), 0);
+	KT_EQ(vmm_protect(uva, PTE_U | PTE_W | PTE_NX), 0);
+	KT_EQ(uvm_free(0, uva, 1), 0);
+	KT_EQ(vmm_unmap(uva, NULL), -ENOENT);
+	KT_EQ(vmm_protect(uva, PTE_U | PTE_NX), -ENOENT);
+	pmm_free(spare, 0);
+}
+
+/* ...and its page-table pages are read-only: a direct write to the PTE of
+ * a text page, its PD entry or PDPT entry faults. */
+KTEST(131, kernel_page_tables_are_read_only)
+{
+	extern char __text_start[], __data_start[];
+	uint64_t pml4e = ((uint64_t *)phys_to_virt(read_cr3() & PTE_ADDR_MASK))[511];
+	uint64_t text = (uint64_t)__text_start;
+	uint64_t *pdpt = phys_to_virt(pml4e & PTE_ADDR_MASK);
+	uint64_t *pdpte = &pdpt[(text >> 30) & 511];
+	uint64_t *pd = phys_to_virt(*pdpte & PTE_ADDR_MASK);
+	uint64_t *pde = &pd[(text >> 21) & 511];
+	uint64_t *pt = phys_to_virt(*pde & PTE_ADDR_MASK);
+	uint64_t *pte = &pt[(text >> 12) & 511];
+	KT_EQ(*pte & PTE_ADDR_MASK, virt_to_phys(__text_start)); /* found the right entry */
+	KT_EQ(try_access(do_read8, (uint64_t)pte), 0);
+	KT_EQ(try_access(do_write8, (uint64_t)pte), PF);
+	KT_EQ(try_access(do_write8, (uint64_t)pde), PF);
+	KT_EQ(try_access(do_write8, (uint64_t)pdpte), PF);
+	/* the PTE of a data page (writable data, read-only table) as well */
+	uint64_t d = (uint64_t)__data_start;
+	uint64_t *dpt = phys_to_virt(pd[(d >> 21) & 511] & PTE_ADDR_MASK);
+	KT_EQ(try_access(do_write8, (uint64_t)&dpt[(d >> 12) & 511]), PF);
+	/* nothing changed */
+	uint64_t pa = 0;
+	KT_ASSERT(vmm_translate(text, &pa, NULL));
+	KT_EQ(pa, virt_to_phys(__text_start));
+}

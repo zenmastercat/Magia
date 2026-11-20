@@ -46,8 +46,8 @@ void uaccess_end(void)
 static int free_pages_range(uint64_t uva, uint64_t n)
 {
 	for (uint64_t i = 0; i < n; i++) {
-		uint64_t pa = vmm_unmap(uva + i * PAGE_SIZE);
-		if (pa) {
+		uint64_t pa = 0;
+		if (vmm_unmap(uva + i * PAGE_SIZE, &pa) == 0) {
 			pmm_free(pa, 0);
 			uvm_pages_mapped--;
 		}

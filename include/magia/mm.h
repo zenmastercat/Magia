@@ -57,7 +57,12 @@ void pmm_dump(void);
 
 void vmm_init(void);
 int vmm_map(uint64_t va, uint64_t pa, uint64_t flags);
-uint64_t vmm_unmap(uint64_t va); /* returns old physical address or 0 */
+/* vmm_map/vmm_protect/vmm_unmap return 0 or -errno; after
+ * vmm_lock_kernel() the kernel window (PML4 slot 511) is refused (-EPERM). */
+int vmm_protect(uint64_t va, uint64_t flags);
+int vmm_unmap(uint64_t va, uint64_t *old_pa); /* -ENOENT if nothing was mapped */
+void vmm_lock_kernel(void);
+bool vmm_kernel_locked(void);
 bool vmm_translate(uint64_t va, uint64_t *pa, uint64_t *flags);
 void *vmm_map_mmio(uint64_t pa, uint64_t len); /* uncached, at dmap_base + pa */
 extern uint64_t vmm_dmap_bytes;

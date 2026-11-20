@@ -17,6 +17,7 @@
  * No mapping is ever both writable and executable (checked by ktest 1xx).
  * User windows (uvm.c) live below USER_TOP with the U bit.
  */
+#include <magia/abi.h>
 #include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/linker_set.h>
@@ -67,17 +68,36 @@ static uint64_t *walk(uint64_t *pml4, uint64_t va, int stop, bool create)
 	return &table[(va >> (12 + 9 * (stop - 1))) & 511];
 }
 
+/*
+ * Immutable kernel image (OpenBSD mimmutable(2) idea, re-implemented):
+ * once vmm_lock_kernel() ran, the mappings of the kernel window (PML4
+ * slot 511: the image, text R+X, rodata R, data/bss RW+NX) can no longer
+ * be changed through vmm_map/vmm_protect/vmm_unmap (-EPERM), and the
+ * page-table pages that hold them are read-only in the direct map, so a
+ * stray or malicious write to a PTE faults instead of remapping the
+ * kernel. shortcut: the PML4 itself and the direct map's own tables stay
+ * writable (user windows and MMIO still need them); a kernel-write
+ * primitive could re-point PML4[511]. Upgrade with per-process PML4s
+ * built from a locked template (stage 3) and CR0.WP-protected PML4 pages.
+ */
+static bool kernel_locked;
+static uint64_t immutable_start; /* first VA of PML4 slot 511 */
+
+static bool immutable(uint64_t va) { return kernel_locked && va >= immutable_start; }
+
 int vmm_map(uint64_t va, uint64_t pa, uint64_t flags)
 {
 	if (!nx_enabled)
 		flags &= ~PTE_NX;
 	if ((flags & PTE_W) && !(flags & PTE_NX) && nx_enabled)
 		panic("vmm_map: refusing W+X mapping at %p", (void *)va);
+	if (immutable(va))
+		return -EPERM;
 	spin_lock(&vmm_lock);
 	uint64_t *pte = walk(kernel_pml4, va, 1, true);
 	if (!pte) {
 		spin_unlock(&vmm_lock);
-		return -1;
+		return -EINVAL;
 	}
 	*pte = (pa & PTE_ADDR_MASK) | flags | PTE_P;
 	invlpg(va);
@@ -85,18 +105,43 @@ int vmm_map(uint64_t va, uint64_t pa, uint64_t flags)
 	return 0;
 }
 
-uint64_t vmm_unmap(uint64_t va)
+/* Change the flags of an existing 4 KiB mapping. */
+int vmm_protect(uint64_t va, uint64_t flags)
 {
+	if (!nx_enabled)
+		flags &= ~PTE_NX;
+	if ((flags & PTE_W) && !(flags & PTE_NX) && nx_enabled)
+		return -EINVAL;
+	if (immutable(va))
+		return -EPERM;
 	spin_lock(&vmm_lock);
 	uint64_t *pte = walk(kernel_pml4, va, 1, false);
-	uint64_t old = 0;
+	int r = -ENOENT;
 	if (pte && (*pte & PTE_P)) {
-		old = *pte & PTE_ADDR_MASK;
-		*pte = 0;
+		*pte = (*pte & PTE_ADDR_MASK) | flags | PTE_P;
 		invlpg(va);
+		r = 0;
 	}
 	spin_unlock(&vmm_lock);
-	return old;
+	return r;
+}
+
+int vmm_unmap(uint64_t va, uint64_t *old_pa)
+{
+	if (immutable(va))
+		return -EPERM;
+	spin_lock(&vmm_lock);
+	uint64_t *pte = walk(kernel_pml4, va, 1, false);
+	int r = -ENOENT;
+	if (pte && (*pte & PTE_P)) {
+		if (old_pa)
+			*old_pa = *pte & PTE_ADDR_MASK;
+		*pte = 0;
+		invlpg(va);
+		r = 0;
+	}
+	spin_unlock(&vmm_lock);
+	return r;
 }
 
 bool vmm_translate(uint64_t va, uint64_t *pa, uint64_t *flags)
@@ -236,6 +281,62 @@ void *vmm_map_mmio(uint64_t pa, uint64_t len)
 	}
 	return phys_to_virt(pa);
 }
+
+/* Make the direct-map alias of page-table page `pa` read-only, splitting
+ * a 2 MiB direct-map page into 4 KiB pages first if needed. */
+static void dmap_make_ro(uint64_t pa)
+{
+	uint64_t va = dmap_base + pa;
+	uint64_t *pde = walk(kernel_pml4, va, 2, false);
+	if (!pde || !(*pde & PTE_P))
+		panic("vmm: page table %p is not in the direct map", (void *)pa);
+	if (*pde & PTE_PS) {
+		uint64_t base = *pde & PTE_ADDR_MASK & ~((2ULL << 20) - 1);
+		uint64_t fl = *pde & ~PTE_ADDR_MASK & ~PTE_PS; /* bit 12 (PAT) is clear for WB */
+		uint64_t *pt = pt_alloc();
+		for (int i = 0; i < 512; i++)
+			pt[i] = (base + (uint64_t)i * PAGE_SIZE) | fl;
+		*pde = virt_to_phys(pt) | PTE_P | PTE_W;
+		write_cr3(read_cr3()); /* drop the 2 MiB TLB entry (and global ones below) */
+	}
+	uint64_t *pte = walk(kernel_pml4, va, 1, false);
+	*pte &= ~PTE_W;
+	invlpg(va);
+}
+
+/* Lock the kernel window: see "Immutable kernel image" above. */
+void vmm_lock_kernel(void)
+{
+	immutable_start = 0xffffff8000000000ULL; /* PML4 slot 511 */
+	KASSERT(kernel_virt_base >= immutable_start);
+	uint64_t pml4e = kernel_pml4[511];
+	uint64_t ro_pages = 0;
+	/* every table below PML4[511]: the PDPT, the PDs, the PTs (4 KiB only) */
+	uint64_t *pdpt = phys_to_virt(pml4e & PTE_ADDR_MASK);
+	spin_lock(&vmm_lock);
+	for (int i = 0; i < 512; i++) {
+		if (!(pdpt[i] & PTE_P) || (pdpt[i] & PTE_PS))
+			continue;
+		uint64_t *pd = phys_to_virt(pdpt[i] & PTE_ADDR_MASK);
+		for (int j = 0; j < 512; j++)
+			if ((pd[j] & PTE_P) && !(pd[j] & PTE_PS)) {
+				dmap_make_ro(pd[j] & PTE_ADDR_MASK);
+				ro_pages++;
+			}
+		dmap_make_ro(pdpt[i] & PTE_ADDR_MASK);
+		ro_pages++;
+	}
+	dmap_make_ro(pml4e & PTE_ADDR_MASK);
+	ro_pages++;
+	kernel_locked = true;
+	spin_unlock(&vmm_lock);
+	kprintf("vmm: kernel image locked: %lu page-table pages read-only, remaps refused\n", ro_pages);
+}
+
+bool vmm_kernel_locked(void) { return kernel_locked; }
+
+static void vmm_lock_sysinit(void) { vmm_lock_kernel(); }
+SYSINIT(vmm_lock, SI_ORDER_LAST, vmm_lock_sysinit); /* last boot step */
 
 static void vmm_sysinit(void) { vmm_init(); }
 SYSINIT(vmm, 20001, vmm_sysinit); /* right after pmm (SI_ORDER_VM) */
