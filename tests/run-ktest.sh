@@ -36,7 +36,7 @@ log="$LOGDIR/ktest.log"
 echo "== ktest: booting $ELF in QEMU ($ACCEL, ${TIMEOUT}s timeout)"
 qemu "ktest" </dev/null >"$log" 2>&1
 st=$?
-tr -d '\r' <"$log" | grep -E '^KTEST (RUN|FAIL|TIMEOUT|PANIC)|check failed|panic' | grep -v '^KTEST RUN' | sed 's/^/   /'
+tr -d '\r' <"$log" | grep -E '^KTEST (RUN|FAIL|TIMEOUT|PANIC)|check failed|Magia panic' | grep -v '^KTEST RUN' | sed 's/^/   /'
 summary=$(tr -d '\r' <"$log" | grep '^KTEST SUMMARY' | tail -1)
 echo "   QEMU exit status: $st (33 = all passed)"
 if [ -z "$summary" ]; then

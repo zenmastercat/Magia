@@ -1,0 +1,5 @@
+# Kernel build flags: the staticlib is linked into a higher-half kernel at
+# -2 GiB, so use the kernel code model with absolute relocations, and keep
+# frame pointers for panic backtraces.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static", "-C", "code-model=kernel", "-C", "force-frame-pointers=yes"]
