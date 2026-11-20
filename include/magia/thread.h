@@ -14,7 +14,8 @@
 #define MAX_THREADS 128
 #define KSTACK_ORDER 2 /* 16 KiB kernel stacks */
 #define KSTACK_SIZE (PAGE_SIZE << KSTACK_ORDER)
-#define STACK_CANARY 0x4d61676961537421ULL /* "Magia" stack bottom marker */
+extern uint64_t stack_canary; /* kernel/rng.c: random per boot */
+#define STACK_CANARY stack_canary /* bottom-of-stack marker of every kernel thread */
 
 enum thread_state { TS_FREE = 0, TS_EMBRYO, TS_RUNNABLE, TS_SLEEPING, TS_DEAD };
 

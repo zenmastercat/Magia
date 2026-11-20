@@ -42,6 +42,7 @@ _start:
 	movq %r8, __stack_chk_guard(%rip)
 
 	call boot_early
+	call rng_early_init	/* ChaCha20 RNG; replaces the guard with its output */
 	call kmain
 4:	cli
 	hlt
