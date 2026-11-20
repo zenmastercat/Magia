@@ -20,7 +20,9 @@
 //! Attack-surface controls (Google reported that 60% of the Linux kernel
 //! exploits submitted to its kCTF VRP used io_uring - "Learnings from kCTF
 //! VRP's 42 Linux kernel exploits submissions", Google Security Blog,
-//! 2023-06-14): only four ops (NOP, READ, WRITE,
+//! 2023-06-14, https://security.googleblog.com/2023/06/learnings-from-kctf-vrps-42-linux.html
+//! - "in the past year, there has been a clear trend: 60% of the
+//! submissions exploited the io_uring component"): only four ops (NOP, READ, WRITE,
 //! TIMEOUT); READ/WRITE call the *same* `io_read`/`io_write` path as
 //! read(2)/write(2), so Capsicum rights and user-pointer checks are shared;
 //! a global kill switch (sysctl kern.ring.enable) and a per-jail
