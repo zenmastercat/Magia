@@ -17,6 +17,7 @@
  * ACPI _PRT methods (AML), which Magia does not interpret.
  */
 #include <magia/acpi.h>
+#include <magia/boot.h>
 #include <magia/linker_set.h>
 #include <magia/mm.h>
 #include <magia/abi.h>
@@ -87,7 +88,37 @@ void pci_write32(const struct pci_dev *d, uint32_t off, uint32_t v)
 }
 
 static void scan_bus(uint8_t bus, int depth);
-void pci_read_bars(struct pci_dev *d);
+
+/* The display function scanning out the boot framebuffer: one of its
+ * memory BARs contains the address Limine handed over. */
+bool pci_owns_framebuffer(const struct pci_dev *d)
+{
+	uint64_t fb = bootinfo.fb.pa;
+	if (!fb || d->class != 0x03)
+		return false;
+	for (int i = 0; i < 6; i++) {
+		const struct pci_bar *b = &d->bar[i];
+		if (!b->io && b->size && fb >= b->base && fb - b->base < b->size)
+			return true;
+	}
+	return false;
+}
+
+/* No IOMMU: a function's DMA stays off until a driver needs it
+ * (xhci_start, pci_enable_msi). The bus-master bit is only a host hint -
+ * a hostile device can ignore it - so this fences well-behaved devices
+ * that firmware left on, not attackers (review 2b M1; VT-d DMA
+ * remapping in stage 4 is the real boundary). Bridges keep it: it only
+ * forwards their children's DMA, and a driven child may sit behind one.
+ * shortcut: the display function that owns the boot framebuffer keeps
+ * it too (an integrated GPU may scan the framebuffer out of RAM); every
+ * other display controller loses it. */
+void pci_bus_master_policy(struct pci_dev *d)
+{
+	if ((d->header_type & 0x7f) != 0 || pci_owns_framebuffer(d))
+		return;
+	pci_write16(d, PCI_COMMAND, pci_read16(d, PCI_COMMAND) & ~PCI_CMD_MASTER);
+}
 
 static void scan_function(volatile uint8_t *win, uint8_t bus, uint8_t dev, uint8_t fn, int depth)
 {
@@ -101,19 +132,12 @@ static void scan_function(volatile uint8_t *win, uint8_t bus, uint8_t dev, uint8
 	tmp.subclass = pci_read8(&tmp, PCI_SUBCLASS);
 	tmp.class = pci_read8(&tmp, PCI_CLASS);
 	tmp.header_type = pci_read8(&tmp, PCI_HEADER_TYPE);
-	/* No IOMMU: a function's DMA stays off until a driver needs it
-	 * (xhci_start, pci_enable_msi). Bridges keep it: it only forwards their
-	 * children's DMA, and a driven child may sit behind one.
-	 * shortcut: display controllers keep it too (an integrated GPU may scan
-	 * the boot framebuffer out of RAM); VT-d DMA remapping (stage 4) fences them. */
-	if ((tmp.header_type & 0x7f) == 0 && tmp.class != 0x03)
-		pci_write16(&tmp, PCI_COMMAND, pci_read16(&tmp, PCI_COMMAND) & ~PCI_CMD_MASTER);
-	if (pci_ndevs < PCI_MAX_DEVS) {
-		uint64_t f = irq_save(); /* decoding is briefly off: nothing may print to the framebuffer */
-		pci_read_bars(&tmp);
-		irq_restore(f);
+	uint64_t f = irq_save(); /* decoding is briefly off: nothing may print to the framebuffer */
+	pci_read_bars(&tmp);
+	irq_restore(f);
+	pci_bus_master_policy(&tmp); /* needs the BARs: who holds the framebuffer */
+	if (pci_ndevs < PCI_MAX_DEVS)
 		pci_devs[pci_ndevs++] = tmp;
-	}
 	/* shortcut: trusts the firmware's bus numbering (no re-assignment),
 	 * enough for UEFI-booted PCs; hot-plug bridges would need resources. */
 	if ((tmp.header_type & 0x7f) == 1 && depth < 16) {

@@ -141,9 +141,13 @@ Still to do on the device side, carried into stages 3-4:
   xHCI, or a hostile PCIe / Thunderbolt device on a physical port) can
   write any RAM: kernel text, page tables, the immutable image. W^X, NX
   and the immutable image protect against the CPU only. Bus mastering is
-  turned off on every endpoint function Magia does not drive (bridges and
-  display controllers excepted), which does not stop a hostile device
-  that ignores the bit. VT-d DMA remapping comes in stage 4.
+  turned off on every endpoint function Magia does not drive, except the
+  display function that owns the boot framebuffer; bridges keep it, so
+  everything behind a bridge (Thunderbolt, PCIe slots) can still do DMA
+  once its own bit is on. The bit is a host hint, not a boundary: a
+  hostile device can ignore it. The real fix is VT-d / AMD-Vi DMA
+  remapping (stage 4: a domain for each driven device, none for the
+  rest).
 - **I/O APIC and MSI destinations are 8-bit** (xAPIC format): fine for the
   BSP on QEMU and the target (BSP id 0), not for ids above 254 without
   VT-d interrupt remapping.

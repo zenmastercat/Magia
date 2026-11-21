@@ -66,6 +66,10 @@ void pci_dump(void); /* lspci */
  * (base, start bus lo, end bus hi), or 0 if it is not a sane window. */
 uint64_t pci_ecam_window(uint64_t base, uint8_t lo, uint8_t hi, unsigned bus);
 
+/* DMA policy: bus master off except bridges and the framebuffer's display function */
+bool pci_owns_framebuffer(const struct pci_dev *d);
+void pci_bus_master_policy(struct pci_dev *d);
+
 /* BARs and capabilities */
 void pci_read_bars(struct pci_dev *d);
 int pci_find_cap(const struct pci_dev *d, uint8_t id); /* offset or 0 */

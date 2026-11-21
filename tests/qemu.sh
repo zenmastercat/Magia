@@ -13,7 +13,8 @@
 # Environment: QEMU (may carry a prefix such as "taskset -c 0 qemu-system-x86_64"), QEMU_ACCEL, QEMU_MEM, QEMU_SMP, QEMU_CPU, OVMF
 # (path to OVMF.fd, or "bios" for SeaBIOS), QEMU_USB (kbd: an xHCI
 # controller with a USB keyboard, the default; xhci: the controller only;
-# desktop: the target desktop's shape - no i8042, two xHCI controllers, a
+# desktop: the target desktop's shape - no i8042, a second display
+# controller (secondary-vga; the desktop has an iGPU and a GPU), two xHCI controllers, a
 # usb-mouse on the first, a usb-hub on USB 2 port 3 of the second with a
 # usb-kbd behind it (3.1) and a second usb-kbd on USB 2 port 4; QEMU puts
 # its USB 3 ports first, so the guest sees these as xHCI root ports 7,
@@ -32,7 +33,7 @@ kbd) usb="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0" ;;
 xhci) usb="-device qemu-xhci,id=xhci" ;; # QEMU sendkey then reaches the PS/2 keyboard
 desktop)
 	machine=q35,i8042=off
-	usb="-device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0,port=1,id=ms
+	usb="-device secondary-vga -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0,port=1,id=ms
 	     -device qemu-xhci,id=xhci2 -device usb-hub,bus=xhci2.0,port=3,id=hub
 	     -device usb-kbd,bus=xhci2.0,port=4,id=kr -device usb-kbd,bus=xhci2.0,port=3.1,id=kh" ;;
 *) usb= ;;

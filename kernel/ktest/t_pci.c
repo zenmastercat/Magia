@@ -152,7 +152,7 @@ KTEST(064, pci_bus_master_off_on_undriven_functions)
 	for (int i = 0; i < pci_ndevs; i++) {
 		struct pci_dev *d = &pci_devs[i];
 		bool driven = d->class == 0x0c && d->subclass == 0x03 && d->prog_if == 0x30; /* every xHCI */
-		if (driven || (d->header_type & 0x7f) != 0 || d->class == 0x03)
+		if (driven || (d->header_type & 0x7f) != 0 || pci_owns_framebuffer(d))
 			continue;
 		checked++;
 		if (pci_read16(d, PCI_COMMAND) & PCI_CMD_MASTER) {
@@ -216,4 +216,63 @@ KTEST(065, pci_64bit_bar_in_last_slot_is_invalid)
 	KT_EQ(fake.bar[4].size, 16);
 	KT_EQ(fake.bar[5].size, 0);
 	kfree(cfg);
+}
+
+/* Review 2b M1: bus mastering stays on only for bridges and for the one
+ * display function whose BAR holds the boot framebuffer; any other
+ * display controller loses it like every undriven function. (The bit is
+ * a host hint: a hostile device can ignore it; VT-d is the real fix.) */
+KTEST(067, pci_bus_master_only_for_the_framebuffer_owner)
+{
+	uint64_t fb = bootinfo.fb.pa;
+	KT_ASSERT(fb != 0);
+	uint8_t *cfg = kzalloc(4096);
+	KT_ASSERT(cfg != NULL);
+	if (!cfg)
+		return;
+	/* a made-up display controller whose BAR 2 contains the framebuffer */
+	struct pci_dev owner = { .cfg = cfg, .class = 0x03, .subclass = 0x00 };
+	owner.bar[2] = (struct pci_bar){ .base = ALIGN_DOWN(fb, 0x1000000), .size = 0x2000000 };
+	*(uint16_t *)(cfg + PCI_COMMAND) = PCI_CMD_MEM | PCI_CMD_MASTER;
+	KT_ASSERT(pci_owns_framebuffer(&owner));
+	pci_bus_master_policy(&owner);
+	KT_EQ(*(uint16_t *)(cfg + PCI_COMMAND) & PCI_CMD_MASTER, PCI_CMD_MASTER);
+	/* another display controller (BAR elsewhere): bus master off */
+	struct pci_dev other = owner;
+	other.bar[2] = (struct pci_bar){ .base = fb + 0x40000000, .size = 0x1000000 };
+	KT_ASSERT(!pci_owns_framebuffer(&other));
+	pci_bus_master_policy(&other);
+	KT_EQ(*(uint16_t *)(cfg + PCI_COMMAND), PCI_CMD_MEM);
+	/* an I/O BAR at the same number does not count; a bridge keeps it */
+	struct pci_dev iobar = owner;
+	iobar.bar[2].io = true;
+	KT_ASSERT(!pci_owns_framebuffer(&iobar));
+	struct pci_dev bridge = other;
+	bridge.header_type = 1;
+	*(uint16_t *)(cfg + PCI_COMMAND) = PCI_CMD_MASTER;
+	pci_bus_master_policy(&bridge);
+	KT_EQ(*(uint16_t *)(cfg + PCI_COMMAND), PCI_CMD_MASTER);
+	kfree(cfg);
+	/* the real machine: exactly one display function owns the
+	 * framebuffer (QEMU's VGA); in the desktop boot a second display
+	 * controller (secondary-vga) is there and has bus mastering off */
+	int owners = 0, others = 0;
+	for (int i = 0; i < pci_ndevs; i++) {
+		struct pci_dev *d = &pci_devs[i];
+		if (d->class != 0x03)
+			continue;
+		if (pci_owns_framebuffer(d)) {
+			owners++;
+			continue;
+		}
+		others++;
+		KT_EQ(pci_read16(d, PCI_COMMAND) & PCI_CMD_MASTER, 0);
+		/* firmware may never have set it: set it, apply the policy */
+		uint16_t cmd = pci_read16(d, PCI_COMMAND);
+		pci_write16(d, PCI_COMMAND, cmd | PCI_CMD_MASTER);
+		pci_bus_master_policy(d);
+		KT_EQ(pci_read16(d, PCI_COMMAND), cmd);
+	}
+	KT_EQ(owners, 1);
+	KT_EQ(others, cmdline_has("kt-desktop") ? 1 : 0);
 }

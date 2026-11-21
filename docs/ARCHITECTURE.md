@@ -177,11 +177,16 @@ ACPI, each step logged.
   and write any physical memory, so W^X, NX and the immutable kernel
   image hold against the CPU only, not against device DMA (a faulty
   xHCI, a hostile PCIe or Thunderbolt device). As cheap hardening the
-  scan turns bus mastering off on every endpoint function; only
-  `xhci_start()` and `pci_enable_msi()` turn it back on for the device
-  Magia drives. Bridges keep it (it only forwards their children's DMA),
-  and so do display controllers (an integrated GPU may scan out the boot
-  framebuffer). VT-d DMA remapping is planned for stage 4.
+  scan turns bus mastering off on every endpoint function
+  (`pci_bus_master_policy`); only `xhci_start()` and `pci_enable_msi()`
+  turn it back on for the device Magia drives. Bridges keep it (it only
+  forwards their children's DMA, and a driven child may sit behind one),
+  and so does the one display function whose BAR holds the boot
+  framebuffer (an integrated GPU may scan it out of RAM); other display
+  controllers lose it. The bus-master bit is a host hint, not a security
+  boundary: a hostile device can ignore it and do DMA anyway, and devices
+  behind bridges are only as fenced as their own bit. The real fix is
+  VT-d / AMD-Vi DMA remapping, planned for stage 4.
 - **xhci.c**: every xHCI controller (PCI class 0c/03/30, up to 4), mostly
   after OpenBSD's driver: BIOS hand-off, Intel port routing, reset,
   device-context array and scratchpad buffers, a command ring and one
