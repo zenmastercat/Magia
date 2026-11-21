@@ -178,4 +178,17 @@ KTEST(055, tsc_hz_from_cpuid_leaves)
 	KT_EQ(tsc_hz_from_cpuid(&var), 0);
 	struct tsc_cpuid unknown = { true, true, 0x15, 6, 0x99, 1, 100, 0, 0 };
 	KT_EQ(tsc_hz_from_cpuid(&unknown), 0);
+	/* review L1: extreme register values must not wrap 64 bits into a
+	 * plausible-looking frequency; anything outside 100 MHz..20 GHz is
+	 * refused */
+	struct tsc_cpuid big = { true, true, 0x15, 6, 0x99, 1, 0xffffffffu, 0xffffffffu, 0 };
+	KT_EQ(tsc_hz_from_cpuid(&big), 0); /* 1.8e19 Hz: fits 64 bits, but absurd */
+	struct tsc_cpuid wrap = { true, true, 0x15, 6, 0x99, 1, 0xffffffffu, 0x40000000u, 0 };
+	KT_EQ(tsc_hz_from_cpuid(&wrap), 0); /* crystal * num overflows 64 bits */
+	struct tsc_cpuid dwrap = { true, true, 0x16, 6, 0x99, 0xffffffffu, 1, 0, 0xffff };
+	KT_EQ(tsc_hz_from_cpuid(&dwrap), 0); /* base * 1e6 * den overflows when deriving the crystal */
+	struct tsc_cpuid wrap16 = { true, true, 0x16, 6, 0x99, 1, 0x8000u, 0x10000000u, 0x1000 };
+	KT_EQ(tsc_hz_from_cpuid(&wrap16), 0); /* the product wraps to a value near the base: still refused */
+	struct tsc_cpuid slow = { true, true, 0x15, 6, 0x99, 1000, 1, 24000000, 0 };
+	KT_EQ(tsc_hz_from_cpuid(&slow), 0); /* 24 kHz */
 }

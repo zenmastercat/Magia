@@ -33,6 +33,8 @@
 #include <magia/x86.h>
 
 #define PIT_FREQ 1193182ULL
+#define TSC_HZ_MIN 100000000ULL   /* plausible TSC frequencies */
+#define TSC_HZ_MAX 20000000000ULL
 /* A 10 ms PIT wait that takes longer than this many TSC cycles means a
  * gated PIT: 40x the window at 1 GHz, 8x at 5 GHz. */
 #define PIT_TIMEOUT_CYCLES 400000000ULL
@@ -92,7 +94,9 @@ uint64_t tsc_hz_from_cpuid(const struct tsc_cpuid *l)
 	if (!l->intel || !l->invariant || l->max_leaf < 0x15 || l->den == 0 || l->num == 0)
 		return 0;
 	uint32_t base_mhz = l->max_leaf >= 0x16 ? l->base_mhz : 0;
-	uint64_t crystal = l->crystal;
+	/* 128-bit: base * 1e6 * den and crystal * num both overflow 64 bits
+	 * with 32-bit CPUID fields (review L1) */
+	unsigned __int128 crystal = l->crystal;
 	if (crystal == 0) { /* SDM table 18-85 for CPUs that leave it 0 */
 		uint32_t m = l->model;
 		if (l->family == 6 && (m == 0x4e || m == 0x5e || m == 0x8e || m == 0x9e || m == 0xa5 || m == 0xa6))
@@ -102,11 +106,14 @@ uint64_t tsc_hz_from_cpuid(const struct tsc_cpuid *l)
 		else if (l->family == 6 && m == 0x55) /* Skylake-X / Cascade Lake */
 			crystal = 25000000;
 		else if (base_mhz) /* derive it from the base frequency */
-			crystal = (uint64_t)base_mhz * 1000000 * l->den / l->num;
+			crystal = (unsigned __int128)base_mhz * 1000000 * l->den / l->num;
 		else
 			return 0;
 	}
-	uint64_t hz = crystal * l->num / l->den;
+	unsigned __int128 wide = crystal * l->num / l->den;
+	if (wide < TSC_HZ_MIN || wide > TSC_HZ_MAX)
+		return 0; /* no x86-64 TSC runs below 100 MHz or above 20 GHz */
+	uint64_t hz = (uint64_t)wide;
 	/* cross-check with the base frequency: a table or firmware error
 	 * shows up as a big disagreement */
 	if (base_mhz && (hz / 1000000 > base_mhz * 11ULL / 10 || hz / 1000000 < base_mhz * 9ULL / 10))
