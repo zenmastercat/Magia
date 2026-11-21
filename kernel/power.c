@@ -178,7 +178,16 @@ void acpi_power_dump(void)
 	if (acpi.pm1b_cnt)
 		kprintf(", PM1b 0x%lx", acpi.pm1b_cnt);
 	if (acpi.s5_found)
+	{
 		kprintf(", \\_S5 %u/%u", acpi.slp_typa, acpi.slp_typb);
+		if (acpi.s5_scan)
+		{
+			kprintf(" (byte scan: AML walk stopped at DSDT+0x%x:", acpi.s5_walk_stop);
+			for (int k = 0; k < 8; k++)
+				kprintf(" %02x", acpi.s5_walk_bytes[k]);
+			kprintf(")");
+		}
+	}
 	else
 		kprintf(", no \\_S5 (%u)", acpi.s5_error);
 	kprintf("%s\n", acpi.hw_reduced ? ", hardware-reduced" : "");

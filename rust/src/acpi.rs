@@ -536,17 +536,23 @@ pub fn parse_fadt(t: &[u8]) -> Result<Fadt, AcpiError> {
 }
 
 /// `\_S5` from the DSDT, else from the first SSDT that has it.
-fn find_s5(m: &dyn PhysMem, root: &RootTables, dsdt: u64) -> Result<crate::aml::SleepType, crate::aml::AmlError> {
+fn find_s5(m: &dyn PhysMem, root: &RootTables, dsdt: u64, bytes: &mut [u8; 8]) -> Result<(crate::aml::SleepType, Option<(usize, u8)>), crate::aml::AmlError> {
     let mut err = crate::aml::AmlError::NotFound;
     if dsdt != 0 {
-        match read_table(m, dsdt, b"DSDT").map(crate::aml::find_s5) {
+        let t = read_table(m, dsdt, b"DSDT");
+        if let Ok(Ok((_, Some((at, _))))) = t.map(crate::aml::find_s5_walk) {
+            for (k, o) in bytes.iter_mut().enumerate() {
+                *o = t.ok().and_then(|t| t.get(at + k)).copied().unwrap_or(0);
+            }
+        }
+        match t.map(crate::aml::find_s5_walk) {
             Ok(Ok(s)) => return Ok(s),
             Ok(Err(e)) => err = e,
-            Err(_) => err = crate::aml::AmlError::BadSignature, // unreadable, bad checksum or length
+            Err(_) => err = crate::aml::AmlError::BadTable, // unreadable, bad checksum or length (review 2b I2)
         }
     }
     for &pa in root.entries.iter().take(root.n) {
-        if let Ok(Ok(s)) = read_table(m, pa, b"SSDT").map(crate::aml::find_s5) {
+        if let Ok(Ok(s)) = read_table(m, pa, b"SSDT").map(crate::aml::find_s5_walk) {
             return Ok(s);
         }
     }
@@ -612,6 +618,10 @@ pub struct CAcpiInfo {
     pub slp_typa: u8,
     pub slp_typb: u8,
     pub s5_error: u8, // 0, or AmlError + 1 (where the \_S5 search stopped)
+    pub s5_scan: u8,  // 1: found by the byte-scan fallback, not the object-level walk
+    pub s5_walk_op: u8,    // the byte the walk stopped at (with s5_scan)
+    pub s5_walk_stop: u32, // its offset in the table
+    pub s5_walk_bytes: [u8; 8], // the bytes there, for a photograph
 }
 
 pub const FOUND_MADT: u32 = 1;
@@ -720,11 +730,18 @@ pub fn parse_all(m: &dyn PhysMem, rsdp_pa: u64, bios: bool, out: &mut CAcpiInfo)
             out.sleep_ctl = g.addr;
             out.sleep_ctl_space = g.space;
         }
-        match find_s5(m, &root, f.dsdt) {
-            Ok(s5) => {
+        let mut bytes = [0u8; 8];
+        match find_s5(m, &root, f.dsdt, &mut bytes) {
+            Ok((s5, stuck)) => {
                 out.s5_found = 1;
                 out.slp_typa = s5.slp_typa;
                 out.slp_typb = s5.slp_typb;
+                if let Some((at, op)) = stuck {
+                    out.s5_scan = 1;
+                    out.s5_walk_stop = at as u32;
+                    out.s5_walk_op = op;
+                    out.s5_walk_bytes = bytes;
+                }
             }
             Err(e) => out.s5_error = e as u8 + 1,
         }
@@ -1164,7 +1181,8 @@ mod tests {
     }
 
     fn dsdt_with(aml: &[u8]) -> Vec<u8> {
-        let mut body = vec![0x10, 0x05, 0x5c, 0x2e, 0x5f, 0x53]; // some other AML first
+        // some other AML first: External(\_SB_.PCI0, DeviceObj)
+        let mut body = vec![0x15, 0x5c, 0x2e, b'_', b'S', b'B', b'_', b'P', b'C', b'I', b'0', 0x06, 0x00];
         body.extend_from_slice(aml);
         sdt(b"DSDT", 2, &body)
     }
@@ -1181,7 +1199,7 @@ mod tests {
         assert_eq!((i.reset_ok, i.reset_space, i.reset_addr, i.reset_value), (1, GAS_IO, 0xcf9, 0x0f));
         assert_eq!((i.pm1a_cnt, i.pm1a_space, i.pm1b_cnt), (0x604, GAS_IO, 0));
         assert_eq!((i.smi_cmd, i.acpi_enable, i.hw_reduced), (0xb2, 0xf1, 0));
-        assert_eq!((i.s5_found, i.slp_typa, i.slp_typb, i.s5_error), (1, 0, 0, 0));
+        assert_eq!((i.s5_found, i.slp_typa, i.slp_typb, i.s5_error, i.s5_scan), (1, 0, 0, 0, 0));
         // legacy PM1a port only, reset register not supported: no reset
         let mut m = machine(&[power_fadt(0x8000, false, false)]);
         m.put(0x8000, &dsdt_with(&S5_77));
@@ -1205,7 +1223,7 @@ mod tests {
         m.put(0x8000, &d);
         parse_all(&m, RSDP, true, &mut i).unwrap();
         assert_eq!(i.found & FOUND_FADT, FOUND_FADT);
-        assert_eq!((i.s5_found, i.s5_error), (0, crate::aml::AmlError::BadSignature as u8 + 1));
+        assert_eq!((i.s5_found, i.s5_error), (0, crate::aml::AmlError::BadTable as u8 + 1));
         assert_eq!(i.reset_ok, 1);
         // a DSDT pointer into nowhere
         let m = machine(&[power_fadt(0xdead_0000, true, true)]);

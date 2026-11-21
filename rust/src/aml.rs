@@ -9,6 +9,10 @@
 //! panics, every loop bounded by the table length. A `\_S5` built by a
 //! method or at run time is not seen (NotFound; poweroff then says so).
 //!
+//! Since review 2b L2 the search walks the definition block object by
+//! object, so `_S5_` bytes inside another object's data do not match; on AML
+//! the walk does not know it falls back to the byte scan and says so.
+//!
 //! First draft by the local model (qwen3.6:27b); reviewed and fixed: wide
 //! values were cut to 8 bits before the SLP_TYP range check, OnesOp gave
 //! BadPackage instead of BadValue, its test tables had a 37-byte header.
@@ -21,6 +25,7 @@ pub enum AmlError {
     NotFound,
     BadPackage,
     BadValue,
+    BadTable, // the DSDT/SSDT itself unreadable (length, checksum, unmapped): set by acpi.rs
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,15 +50,13 @@ fn read_pkg_len(bytes: &[u8]) -> Option<(usize, usize)> {
             return None;
         }
 
+        // the lead's low nibble, then each extra byte 8 bits higher:
+        // bits 4-11, 12-19, 20-27 (n <= 3, so no shift overflows); the draft
+        // shifted by 4, 8, 12, wrong from the second extra byte on (found
+        // by the object-level walk on QEMU's DSDT, review 2b L2)
         let mut val = (*lead & 0x0f) as usize;
         for i in 0..n {
-            let byte = bytes[1 + i];
-            // Shift by 4, 12, 20...
-            // Check for overflow before shifting
-            if 4 * (i + 1) >= 64 {
-                return None;
-            }
-            val |= (byte as usize) << (4 * (i + 1));
+            val |= (bytes[1 + i] as usize) << (4 + 8 * i);
         }
         Some((val, 1 + n))
     }
@@ -83,43 +86,83 @@ fn slp_typ(v: u64) -> Result<u8, AmlError> {
     if v > 7 { Err(AmlError::BadValue) } else { Ok(v as u8) }
 }
 
+/// `\_S5`'s sleep types. A `Name(_S5_, Package)` found by the
+/// object-level walk wins; if the walk gets stuck on AML it does not know,
+/// the byte scan is the fallback (see `find_s5_ex`).
 pub fn find_s5(table: &[u8]) -> Result<SleepType, AmlError> {
-    // 1. Check minimum header length
+    find_s5_ex(table).map(|(s, _)| s)
+}
+
+/// As `find_s5`; the bool is true when the result came from the byte-scan
+/// fallback rather than the object-level walk (review 2b L2: a scan can
+/// match `_S5_` bytes inside another object's data).
+pub fn find_s5_ex(table: &[u8]) -> Result<(SleepType, bool), AmlError> {
+    find_s5_walk(table).map(|(s, stuck)| (s, stuck.is_some()))
+}
+
+/// As `find_s5_ex`, with where the walk stopped (offset in the table, the
+/// byte there) when the byte-scan fallback was used.
+pub fn find_s5_walk(table: &[u8]) -> Result<(SleepType, Option<(usize, u8)>), AmlError> {
     if table.len() < 36 {
         return Err(AmlError::Short);
     }
-
-    // 2. Check Signature
     let sig = &table[0..4];
     if sig != b"DSDT" && sig != b"SSDT" {
         return Err(AmlError::BadSignature);
     }
-
-    // 3. Check Length
-    let len_bytes = &table[4..8];
-    let length = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-
+    let length = u32::from_le_bytes([table[4], table[5], table[6], table[7]]) as usize;
     if length < 36 || length > table.len() {
         return Err(AmlError::BadLength);
     }
-
-    // 4. Define AML body
     let body = &table[36..length];
-    let mut idx = 0;
+    match walk(body, 0, 0) {
+        Walk::Found(r) => r.map(|s| (s, None)),
+        Walk::NotHere => Err(AmlError::NotFound),
+        Walk::Stuck(at, op) => scan_s5(body).map(|s| (s, Some((36 + at, op)))),
+    }
+}
 
-    // 5. Scan body
+/// The `\_S5` package whose PkgLength lead byte is at `b[at]` (right after
+/// the PackageOp): NumElements, then the first two integers.
+fn parse_s5_package(b: &[u8], at: usize) -> Result<SleepType, AmlError> {
+    let (pkg_len, pkg_len_consumed) = read_pkg_len(b.get(at..).ok_or(AmlError::BadPackage)?).ok_or(AmlError::BadPackage)?;
+    // PkgLength counts itself and everything after it
+    let pkg_end = at.checked_add(pkg_len).ok_or(AmlError::BadPackage)?;
+    if pkg_end > b.len() {
+        return Err(AmlError::BadPackage);
+    }
+    let pkg_content_start = at + pkg_len_consumed;
+    if pkg_content_start >= pkg_end {
+        return Err(AmlError::BadPackage);
+    }
+    let num_elements = b[pkg_content_start];
+    if num_elements == 0 {
+        return Err(AmlError::BadPackage);
+    }
+    // elements must lie inside the package: read from a slice ending there
+    let pkg = b.get(pkg_content_start + 1..pkg_end).ok_or(AmlError::BadPackage)?;
+    let (va, used) = read_element(pkg)?;
+    let slp_typa = slp_typ(va)?;
+    let slp_typb = if num_elements >= 2 {
+        let rest = pkg.get(used..).ok_or(AmlError::BadPackage)?;
+        slp_typ(read_element(rest)?.0)?
+    } else {
+        slp_typa // one element: the same value for PM1b
+    };
+    Ok(SleepType { slp_typa, slp_typb })
+}
+
+/// The fallback: `NameOp [\ ^]* _S5_ PackageOp` at any byte offset; the
+/// first match wins.
+fn scan_s5(body: &[u8]) -> Result<SleepType, AmlError> {
+    let mut idx = 0;
     while idx < body.len() {
-        // Look for NameOp (0x08)
         if body.get(idx) != Some(&0x08) {
             idx += 1;
             continue;
         }
-
         let name_op_start = idx;
-        idx += 1; // Skip NameOp
-
-        // Skip optional prefixes: '\\' (0x5c) or '^' (0x5e)
-        // Up to 8 prefixes
+        idx += 1;
         let mut prefix_count = 0;
         while prefix_count < 8 {
             match body.get(idx) {
@@ -130,85 +173,296 @@ pub fn find_s5(table: &[u8]) -> Result<SleepType, AmlError> {
                 _ => break,
             }
         }
-
-        // Check for NameSeg "_S5_"
-        let name_seg = b"_S5_";
-        if idx + name_seg.len() > body.len() {
-            // Not enough room for name seg, skip this NameOp
+        if body.get(idx..idx + 4) != Some(&b"_S5_"[..]) || body.get(idx + 4) != Some(&0x12) {
             idx = name_op_start + 1;
             continue;
         }
+        return parse_s5_package(body, idx + 5);
+    }
+    Err(AmlError::NotFound)
+}
 
-        if &body[idx..idx + name_seg.len()] != name_seg {
-            // Not _S5_, skip this NameOp
-            idx = name_op_start + 1;
-            continue;
+// ---------------------------------------------------------------- object-level walk (review 2b L2)
+//
+// First draft of the walk by the local model (qwen3.6:27b, second try);
+// reviewed and fixed: integer data objects were one byte too long, a
+// name running past its Scope/Device package could panic the slice, its
+// own PkgLength reader was not ACPI's and was dropped, its tests rewritten.
+
+#[derive(Debug, PartialEq, Eq)]
+enum Walk {
+    Found(Result<SleepType, AmlError>),
+    NotHere,
+    Stuck(usize, u8), // offset in the AML body and the byte the walk did not know
+}
+
+const WALK_MAX_DEPTH: u32 = 16;
+
+fn is_name_lead(c: u8) -> bool {
+    c.is_ascii_uppercase() || c == b'_'
+}
+
+fn seg(b: &[u8], at: usize) -> Option<[u8; 4]> {
+    let s: [u8; 4] = b.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    if is_name_lead(s[0]) { Some(s) } else { None }
+}
+
+/// NameString at b[at] (ACPI 6.5 20.2.2): (last NameSeg if any, bytes used).
+fn name_string(b: &[u8], at: usize) -> Option<(Option<[u8; 4]>, usize)> {
+    let mut o = at;
+    if *b.get(o)? == 0x5c {
+        o += 1;
+    } else {
+        let mut n = 0;
+        while b.get(o) == Some(&0x5e) && n < 255 {
+            o += 1;
+            n += 1;
         }
-
-        idx += name_seg.len();
-
-        // Check for PackageOp (0x12)
-        if body.get(idx) != Some(&0x12) {
-            // Not a package, skip this NameOp
-            idx = name_op_start + 1;
-            continue;
+    }
+    let (last, end) = match *b.get(o)? {
+        0x00 => (None, o + 1),
+        0x2e => {
+            seg(b, o + 1)?;
+            (Some(seg(b, o + 5)?), o + 9)
         }
+        0x2f => {
+            let count = *b.get(o + 1)? as usize;
+            if count == 0 {
+                return None;
+            }
+            let mut last = None;
+            for k in 0..count {
+                last = Some(seg(b, o + 2 + 4 * k)?);
+            }
+            (last, o + 2 + 4 * count)
+        }
+        _ => (Some(seg(b, o)?), o + 4),
+    };
+    Some((last, end - at))
+}
 
-        // We have a match: NameOp + Prefixes + "_S5_" + PackageOp
-        // Now parse the package
-        let pkg_op_offset = idx;
-        idx += 1; // Skip PackageOp
+/// PkgLength at b[at]: (end of the package, first byte after the PkgLength).
+fn pkg_end(b: &[u8], at: usize) -> Option<(usize, usize)> {
+    let (len, used) = read_pkg_len(b.get(at..)?)?;
+    let end = at.checked_add(len)?;
+    let body = at + used;
+    if end > b.len() || body > end { None } else { Some((end, body)) }
+}
 
-        // Read PkgLength
-        let pkg_len_bytes = &body[idx..];
-        let (pkg_len, pkg_len_consumed) = match read_pkg_len(pkg_len_bytes) {
-            Some(v) => v,
-            None => return Err(AmlError::BadPackage),
+/// Size of an integer data object at b[at] (ZeroOp, OneOp, OnesOp, Byte/
+/// Word/DWord/QWordPrefix), if it is one and complete.
+fn int_arg(b: &[u8], at: usize) -> Option<usize> {
+    let size = match *b.get(at)? {
+        0x00 | 0x01 | 0xff => 1,
+        0x0a => 2,
+        0x0b => 3,
+        0x0c => 5,
+        0x0e => 9,
+        _ => return None,
+    };
+    let end = at.checked_add(size)?;
+    if end <= b.len() { Some(end) } else { None }
+}
+
+/// Offset after a DataRefObject at b[at]: an integer, a string, or a
+/// Buffer / Package / VarPackage (skipped by PkgLength).
+fn skip_data(b: &[u8], at: usize) -> Option<usize> {
+    match *b.get(at)? {
+        0x0d => {
+            let rest = b.get(at + 1..)?;
+            let nul = rest.iter().position(|&c| c == 0)?;
+            Some(at + 1 + nul + 1)
+        }
+        0x11 | 0x12 | 0x13 => pkg_end(b, at + 1).map(|(end, _)| end),
+        _ => int_arg(b, at),
+    }
+}
+
+/// A named object with a body (Scope, Device, ...): the name at `body`,
+/// `skip` fixed bytes after it, then the body as a TermList.
+fn walk_body(b: &[u8], base: usize, end: usize, body: usize, skip: usize, depth: u32) -> Result<Walk, ()> {
+    let (_, n) = name_string(b, body).ok_or(())?;
+    let start = body.checked_add(n).and_then(|x| x.checked_add(skip)).ok_or(())?;
+    let inner = b.get(start..end).ok_or(())?; /* the name must end inside the package */
+    Ok(walk(inner, base + start, depth + 1))
+}
+
+/// Walk a TermList object by object; `base` is b's offset in the body.
+fn walk(b: &[u8], base: usize, depth: u32) -> Walk {
+    let stuck = |i: usize| Walk::Stuck(base + i, b.get(i).copied().unwrap_or(0));
+    if depth > WALK_MAX_DEPTH {
+        return stuck(0);
+    }
+    let mut i = 0;
+    while i < b.len() {
+        let next = match b[i] {
+            0x08 => {
+                // NameOp: \_S5 if its package follows, else skip the data
+                let Some((last, n)) = name_string(b, i + 1) else { return stuck(i) };
+                let after = i + 1 + n;
+                if last == Some(*b"_S5_") && b.get(after) == Some(&0x12) {
+                    return Walk::Found(parse_s5_package(b, after + 1));
+                }
+                skip_data(b, after)
+            }
+            0x10 => {
+                // ScopeOp
+                let Some((end, body)) = pkg_end(b, i + 1) else { return stuck(i) };
+                match walk_body(b, base, end, body, 0, depth) {
+                    Ok(Walk::NotHere) => Some(end),
+                    Ok(w) => return w,
+                    Err(()) => return stuck(i),
+                }
+            }
+            // Method, If, Else, While, Buffer, Package, VarPackage: skipped whole
+            0x14 | 0xa0 | 0xa1 | 0xa2 | 0x11 | 0x12 | 0x13 => pkg_end(b, i + 1).map(|(end, _)| end),
+            0x15 => name_string(b, i + 1).and_then(|(_, n)| {
+                let e = i + 1 + n + 2; // ObjectType, ArgumentCount
+                if e <= b.len() { Some(e) } else { None }
+            }),
+            0x06 => name_string(b, i + 1)
+                .and_then(|(_, n1)| name_string(b, i + 1 + n1).map(|(_, n2)| i + 1 + n1 + n2)),
+            0x5b => match b.get(i + 1) {
+                Some(&op @ (0x82 | 0x85 | 0x83 | 0x84)) => {
+                    let skip = match op { 0x83 => 6, 0x84 => 3, _ => 0 };
+                    let Some((end, body)) = pkg_end(b, i + 2) else { return stuck(i) };
+                    match walk_body(b, base, end, body, skip, depth) {
+                        Ok(Walk::NotHere) => Some(end),
+                        Ok(w) => return w,
+                        Err(()) => return stuck(i),
+                    }
+                }
+                Some(0x81 | 0x86 | 0x87) => pkg_end(b, i + 2).map(|(end, _)| end),
+                Some(0x01) => name_string(b, i + 2).and_then(|(_, n)| {
+                    let e = i + 2 + n + 1; // SyncFlags
+                    if e <= b.len() { Some(e) } else { None }
+                }),
+                Some(0x02) => name_string(b, i + 2).map(|(_, n)| i + 2 + n),
+                Some(0x80) => name_string(b, i + 2).and_then(|(_, n)| {
+                    let space = i + 2 + n; // RegionSpace byte
+                    b.get(space)?;
+                    int_arg(b, space + 1).and_then(|o| int_arg(b, o))
+                }),
+                _ => None,
+            },
+            _ => None,
         };
-
-        // The PkgLength includes itself.
-        // The package content starts after the PkgLength bytes.
-        // The package ends at: pkg_op_offset + 1 (PackageOp) + pkg_len
-        // Wait, ACPI spec says PkgLength counts itself and everything after it.
-        // So the total size of the package object is 1 (PackageOp) + pkg_len.
-        // The end of the package in the body is: pkg_op_offset + 1 + pkg_len.
-        
-        let pkg_end = match pkg_op_offset.checked_add(1).and_then(|x| x.checked_add(pkg_len)) {
-            Some(v) => v,
-            None => return Err(AmlError::BadPackage),
-        };
-
-        if pkg_end > body.len() {
-            return Err(AmlError::BadPackage);
+        match next {
+            Some(n) if n > i => i = n,
+            _ => return stuck(i),
         }
+    }
+    Walk::NotHere
+}
 
-        // The content of the package starts after the PkgLength bytes
-        let pkg_content_start = idx + pkg_len_consumed;
-        
-        // Check if there is at least one byte for NumElements
-        if pkg_content_start >= pkg_end {
-            return Err(AmlError::BadPackage);
-        }
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+    extern crate std;
+    use std::vec;
+    use std::vec::Vec;
 
-        let num_elements = body[pkg_content_start];
-        if num_elements == 0 {
-            return Err(AmlError::BadPackage);
-        }
+    const REAL: [u8; 12] = [0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00];
 
-        // elements must lie inside the package: read from a slice ending there
-        let pkg = body.get(pkg_content_start + 1..pkg_end).ok_or(AmlError::BadPackage)?;
-        let (va, used) = read_element(pkg)?;
-        let slp_typa = slp_typ(va)?;
-        let slp_typb = if num_elements >= 2 {
-            let rest = pkg.get(used..).ok_or(AmlError::BadPackage)?;
-            slp_typ(read_element(rest)?.0)?
-        } else {
-            slp_typa // one element: the same value for PM1b
-        };
-        return Ok(SleepType { slp_typa, slp_typb });
+    #[test]
+    fn names() {
+        assert_eq!(name_string(&[0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x58, 0x5f, 0x5f, 0x5f], 0), Some((Some(*b"X___"), 10)));
+        let mut m = vec![0x2f, 0x03];
+        m.extend_from_slice(b"AAAABBBBCCCC");
+        assert_eq!(name_string(&m, 0), Some((Some(*b"CCCC"), 14)));
+        assert_eq!(name_string(&m[..13], 0), None);
+        assert_eq!(name_string(&[0x2f, 0x00], 0), None);
+        assert_eq!(name_string(&[0x00], 0), Some((None, 1)));
+        assert_eq!(name_string(&[0x5c, 0x00], 0), Some((None, 2)));
+        assert_eq!(name_string(&[0x5e, 0x5e, b'A', b'B', b'C', b'D'], 0), Some((Some(*b"ABCD"), 6)));
+        assert_eq!(name_string(b"abcd", 0), None);
+        assert_eq!(name_string(&[0x5f, 0x53, 0x35], 0), None);
+        assert_eq!(name_string(&[], 0), None);
+        assert_eq!(name_string(&[0x5e; 300], 0), None); // 255 prefixes, then not a name
     }
 
-    Err(AmlError::NotFound)
+    #[test]
+    fn packages_and_data() {
+        assert_eq!(pkg_end(&[0x03, 0, 0], 0), Some((3, 1)));
+        assert_eq!(pkg_end(&[0x05, 0], 0), None); // past the end
+        let mut two = vec![0x41, 0x04]; // 2-byte PkgLength: 0x41 = 1 | 4 << 4 = 65
+        two.resize(65, 0);
+        assert_eq!(pkg_end(&two, 0), Some((65, 2)));
+        assert_eq!(pkg_end(&two[..64], 0), None);
+        // 3- and 4-byte PkgLength: the extra bytes are bits 4-11, 12-19, 20-27
+        assert_eq!(read_pkg_len(&[0x81, 0x34, 0x12]), Some((0x12341, 3)));
+        assert_eq!(read_pkg_len(&[0xc2, 0x34, 0x12, 0x05]), Some((0x0512342, 4)));
+        assert_eq!(read_pkg_len(&[0x81, 0x34]), None);
+        // QEMU q35's Scope(_SB) holds a Scope(PCI0) of 3747 bytes with a 3-byte length
+        let mut sb = vec![0x10, 0x80 | 0x0a, 0xb0, 0x00, b'_', b'S', b'B', b'_', 0x10, 0x43, 0xea, b'P', b'C', b'I', b'0'];
+        sb.resize(0x0b0a + 1, 0x00); // the outer package: 0xb0a bytes from its PkgLength
+        assert_eq!(pkg_end(&sb, 1), Some((0xb0b, 4)));
+        assert_eq!(skip_data(&[0x0a, 7], 0), Some(2));
+        assert_eq!(skip_data(&[0x0b, 7, 0], 0), Some(3));
+        assert_eq!(skip_data(&[0x0c, 7, 0, 0, 0], 0), Some(5));
+        assert_eq!(skip_data(&[0x0e, 7, 0, 0, 0, 0, 0, 0, 0], 0), Some(9));
+        assert_eq!(skip_data(&[0x0e, 7, 0, 0, 0, 0, 0, 0], 0), None);
+        assert_eq!(skip_data(&[0x0d, b'h', b'i', 0, 9], 0), Some(4));
+        assert_eq!(skip_data(&[0x0d, b'h', b'i'], 0), None);
+        assert_eq!(skip_data(&[0x11, 0x02, 0x00], 0), Some(3));
+        assert_eq!(skip_data(&[0x70], 0), None);
+    }
+
+    #[test]
+    fn walks() {
+        assert_eq!(walk(&REAL, 0, 0), Walk::Found(Ok(SleepType::default())));
+        assert_eq!(walk(&[0x15, b'A', b'B', b'C', b'D', 0, 0, 0x70], 7, 0), Walk::Stuck(14, 0x70)); // absolute offset
+        let mut buried = vec![0x11, 0x0f, 0x0a, 0x0c];
+        buried.extend_from_slice(&REAL);
+        assert_eq!(walk(&buried, 0, 0), Walk::NotHere);
+        let mut dev = vec![0x5b, 0x82, 0x11, b'P', b'C', b'I', b'0'];
+        dev.extend_from_slice(&REAL);
+        assert_eq!(walk(&dev, 0, 0), Walk::Found(Ok(SleepType::default())));
+        // Processor and PowerResource bodies after their fixed bytes
+        let mut cpu = vec![0x5b, 0x83, 0x17, b'C', b'P', b'U', b'0', 0, 0, 0, 0, 0, 0];
+        cpu.extend_from_slice(&REAL);
+        assert_eq!(walk(&cpu, 0, 0), Walk::Found(Ok(SleepType::default())));
+        let mut pwr = vec![0x5b, 0x84, 0x14, b'P', b'W', b'R', b'0', 0, 0, 0];
+        pwr.extend_from_slice(&REAL);
+        assert_eq!(walk(&pwr, 0, 0), Walk::Found(Ok(SleepType::default())));
+        // a Scope whose name runs past its package: Stuck, no panic
+        assert!(matches!(walk(&[0x10, 0x02, b'A', b'B', b'C', b'D'], 0, 0), Walk::Stuck(..)));
+        assert!(matches!(walk(&[0x5b, 0x82, 0x02, b'A', b'B', b'C', b'D'], 0, 0), Walk::Stuck(..)));
+        // External, Alias, Mutex, Event before the real one
+        let mut misc = vec![0x15, b'E', b'X', b'T', b'_', 0x08, 0x00];
+        misc.extend_from_slice(&[0x06, b'A', b'A', b'A', b'A', b'B', b'B', b'B', b'B']);
+        misc.extend_from_slice(&[0x5b, 0x01, b'M', b'U', b'T', b'X', 0x00]);
+        misc.extend_from_slice(&[0x5b, 0x02, b'E', b'V', b'N', b'T']);
+        misc.extend_from_slice(&REAL);
+        assert_eq!(walk(&misc, 0, 0), Walk::Found(Ok(SleepType::default())));
+        // an OperationRegion whose length is not an integer: Stuck
+        assert!(matches!(walk(&[0x5b, 0x80, b'G', b'N', b'V', b'S', 0x00, 0x0c, 0, 0, 0, 0x7f, 0x70], 0, 0), Walk::Stuck(..)));
+        assert!(matches!(walk(&[0x70], 0, 0), Walk::Stuck(..)));
+        assert!(matches!(walk(&[0x5b, 0x99], 0, 0), Walk::Stuck(..)));
+        assert_eq!(walk(&[], 0, 0), Walk::NotHere);
+    }
+
+    #[test]
+    fn fuzz_walk() {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for round in 0..20000 {
+            let len = (next() % 200) as usize;
+            let mut b: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if round % 2 == 0 && len > 20 {
+                let at = (next() % (len as u64 - 16)) as usize;
+                b[at..at + 4].copy_from_slice(&[0x10, (len - at - 1).min(63) as u8, 0x5c, 0x00]);
+                b[at + 4..at + 16].copy_from_slice(&REAL);
+            }
+            let _ = walk(&b, 0, 0);
+            let _ = scan_s5(&b);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -476,6 +730,64 @@ mod tests {
             // Should not panic
             let _ = find_s5(&truncated);
         }
+    }
+
+    /// Review 2b L2: `_S5_` package bytes inside another object's data
+    /// must not match; only an object-level Name does.
+    #[test]
+    fn test_object_level_only() {
+        let buried: [u8; 14] = [0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x08, 0x04, 0x0a, 0x05, 0x0a, 0x05, 0x00, 0x00];
+        let real: [u8; 12] = [0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00];
+        // in a Buffer: 11 <PkgLength> 0a <size> <bytes>
+        let mut buf = vec![0x11, (3 + buried.len()) as u8, 0x0a, buried.len() as u8];
+        buf.extend_from_slice(&buried);
+        let mut b1 = buf.clone();
+        b1.extend_from_slice(&real);
+        assert_eq!(find_s5_ex(&build_table(b"DSDT", &b1)), Ok((SleepType { slp_typa: 0, slp_typb: 0 }, false)));
+        assert_eq!(find_s5(&build_table(b"DSDT", &buf)), Err(AmlError::NotFound));
+        // in a Method body: 14 <PkgLength> NameSeg flags <bytes>
+        let mut m = vec![0x14, (6 + buried.len()) as u8, b'A', b'B', b'C', b'D', 0x00];
+        m.extend_from_slice(&buried);
+        assert_eq!(find_s5(&build_table(b"DSDT", &m)), Err(AmlError::NotFound));
+        // in a string (no 0x00 inside an AML string: a zero-free copy)
+        let mut st = vec![0x08, b'S', b'T', b'R', b'_', 0x0d];
+        st.extend_from_slice(&[0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x02, 0x0a, 0x05, 0x0a, 0x05]);
+        st.push(0x00);
+        st.extend_from_slice(&real);
+        assert_eq!(find_s5_ex(&build_table(b"DSDT", &st)), Ok((SleepType::default(), false)));
+        // Scope(\) { Name(_S5_, ...) } and Device(PCI0) { ... }
+        let mut sc = vec![0x10, (3 + real.len()) as u8, 0x5c, 0x00];
+        sc.extend_from_slice(&real);
+        assert_eq!(find_s5_ex(&build_table(b"DSDT", &sc)), Ok((SleepType::default(), false)));
+        let mut dv = vec![0x5b, 0x82, (5 + buried.len()) as u8, b'P', b'C', b'I', b'0'];
+        dv.extend_from_slice(&buried);
+        assert_eq!(find_s5_ex(&build_table(b"SSDT", &dv)), Ok((SleepType { slp_typa: 5, slp_typb: 5 }, false)));
+        // OperationRegion and Field before the real one: still the walk
+        let mut op = vec![0x5b, 0x80, b'G', b'N', b'V', b'S', 0x00, 0x0c, 0, 0, 0, 0x7f, 0x0b, 0x00, 0x01];
+        op.extend_from_slice(&[0x5b, 0x81, 0x07, b'G', b'N', b'V', b'S', 0x01, 0x00]);
+        op.extend_from_slice(&real);
+        assert_eq!(find_s5_ex(&build_table(b"DSDT", &op)), Ok((SleepType::default(), false)));
+        // AML the walk does not know (StoreOp at top level): byte-scan fallback, flagged
+        let mut un = vec![0x70, 0x0a, 0x01, 0x60];
+        un.extend_from_slice(&real);
+        assert_eq!(find_s5_ex(&build_table(b"DSDT", &un)), Ok((SleepType::default(), true)));
+        // 20 nested Scopes: the walk stops at depth 16, the fallback finds it
+        let mut deep = real.to_vec();
+        for _ in 0..20 {
+            let mut outer = vec![0x10];
+            let len = 1 + 4 + deep.len();
+            if len < 64 {
+                outer.push(len as u8);
+            } else {
+                let len = len + 1;
+                outer.push(0x40 | (len & 0x0f) as u8);
+                outer.push((len >> 4) as u8);
+            }
+            outer.extend_from_slice(b"SCP_");
+            outer.extend_from_slice(&deep);
+            deep = outer;
+        }
+        assert_eq!(find_s5_ex(&build_table(b"DSDT", &deep)), Ok((SleepType::default(), true)));
     }
 
     #[test]

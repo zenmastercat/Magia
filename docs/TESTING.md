@@ -44,7 +44,7 @@ SMI_CMD/ACPI_ENABLE; `\_S5` from the DSDT, from an SSDT when the DSDT has
 none, a DSDT with a bad checksum or pointing nowhere; reset registers in
 an unknown address space or I/O above 0xffff are refused.
 
-**AML reader** (`rust/src/aml.rs`, 8 tests): QEMU q35's `\_S5`
+**AML reader** (`rust/src/aml.rs`): QEMU q35's `\_S5`
 (ZeroOps) and typical firmware encodings (root prefix, BytePrefix), every
 integer data object, one-element packages, 2-byte PkgLength with padding;
 decoys (`_S5_` in a string, a NameOp `_S5_` that is not a package);
@@ -52,7 +52,15 @@ errors: signature, length, short tables, no `\_S5`, PkgLength past the
 body, zero elements, unknown opcodes, values above 7 (also when encoded
 wide: Word 0x0100, DWord 1 << 24), OnesOp, an element past the package
 end; every truncation of a table; 20000 random bodies (half with the
-`NameOp _S5_ PackageOp` bytes planted).
+`NameOp _S5_ PackageOp` bytes planted). Object level (review 2b L2):
+the `_S5_` package bytes inside a Buffer, a Method body or a string do not
+match (NotFound without a real one; the real one after them wins without
+the fallback); `\_S5` inside Scope(\) and Device(PCI0); an
+OperationRegion and a Field before it; AML the walk does not know and 20
+nested Scopes fall back to the byte scan, flagged; the walk's own pieces
+(NameString forms, PkgLength with 1 to 4 bytes, data objects) on their
+own. Ktest 022 checks that QEMU's own DSDT (OVMF and SeaBIOS) is walked to
+`\_S5` without the fallback.
 
 **USB parsers** (`rust/src/usb.rs`, 7 tests; `rust/src/usbhub.rs`, 7
 tests): QEMU's usb-kbd device and configuration descriptors; errors

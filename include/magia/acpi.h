@@ -66,6 +66,10 @@ struct acpi_info {
 	uint8_t acpi_enable, hw_reduced;
 	uint8_t s5_found, slp_typa, slp_typb;
 	uint8_t s5_error; /* 0, or where the \_S5 search stopped (rust/src/aml.rs AmlError + 1) */
+	uint8_t s5_scan;  /* 1: \_S5 found by the byte-scan fallback, not the object-level walk */
+	uint8_t s5_walk_op;    /* with s5_scan: the AML byte the walk stopped at ... */
+	uint32_t s5_walk_stop; /* ... and its offset in the table */
+	uint8_t s5_walk_bytes[8]; /* the DSDT bytes there */
 };
 
 #define ACPI_GAS_MEMORY 0

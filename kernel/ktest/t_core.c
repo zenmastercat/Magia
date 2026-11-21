@@ -209,6 +209,7 @@ KTEST(022, acpi_power_fields_q35)
 	KT_EQ(acpi.pm1b_cnt, 0);
 	KT_EQ(acpi.s5_found, 1);
 	KT_EQ(acpi.s5_error, 0);
+	KT_EQ(acpi.s5_scan, 0); /* found by the object-level walk, not the byte scan (review 2b L2) */
 	KT_EQ(acpi.slp_typa, 0);
 	KT_EQ(acpi.slp_typb, 0);
 	KT_EQ(acpi.hw_reduced, 0);

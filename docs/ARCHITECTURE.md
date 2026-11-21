@@ -147,9 +147,19 @@ overrides, 8 ECAM windows, 64 tables). MADT semantics follow FreeBSD
 `madt.c`. No ACPICA and no AML interpreter: from the FADT it also takes
 the reset register, the PM1a/PM1b control blocks (X_ GAS first), SMI_CMD
 and ACPI_ENABLE and the sleep control register, and `rust/src/aml.rs`
-scans the DSDT (then the SSDTs) for `Name(\_S5, Package(){...})` and
+finds `Name(\_S5, Package(){...})` in the DSDT (then the SSDTs) and
 reads the first two integers - the sleep types for poweroff - with every
-offset bounds-checked.
+offset bounds-checked. It walks the definition block object by object
+(Name with its data, Scope, Device, Processor, PowerResource and
+ThermalZone bodies; Method, If/Else/While, Buffer, Package, Field and
+friends skipped whole by their PkgLength; OperationRegion with integer
+arguments; External, Alias, Mutex, Event), so `_S5_` bytes inside a
+buffer, string or method body do not match. A `\_S5` inside an `If` is
+not seen by the walk. If the walk meets AML it does not know, it falls
+back to a byte scan of the whole table, and `hwinfo` / the boot log say
+"(byte scan: AML walk stopped at DSDT+offset: bytes)": that result can
+in principle come from another object's data (firmware is trusted), and
+the bytes tell which AML to teach the walk next.
 
 `kernel/power.c` uses them: `reboot` writes the reset register (I/O or
 memory), then falls back to the 8042 reset pulse and a triple fault;
@@ -370,7 +380,7 @@ entropy (once), RDSEED, RDRAND, TSC jitter. API: `arc4random_buf`,
 | `abi.rs` | `#[repr(C)]` mirror of `include/magia/abi.h`, size-checked against C at boot |
 | `usb.rs` | USB device/configuration descriptors and HID boot-keyboard reports from devices, parsed as untrusted input; reports to ASCII and VT220 sequences |
 | `acpi.rs` | static ACPI tables (RSDP, XSDT/RSDT, MADT, HPET, MCFG, FADT with its power fields) parsed as untrusted input; no heap, fixed-size results, fuzzed by host tests |
-| `aml.rs` | the `\_S5` package from a DSDT or SSDT (not an AML interpreter), fuzzed |
+| `aml.rs` | the `\_S5` package from a DSDT or SSDT: an object-level walk with a flagged byte-scan fallback (not an AML interpreter), fuzzed |
 | `usbhub.rs` | hub interface, hub descriptors, port status, boot mouse interface and reports from USB devices |
 | `uaccess.rs` | typed `copyin`/`copyout` of user structures and strings (copied once, then validated) |
 | `syscall.rs` | the syscall table: typed argument descriptors, capability-mode flag, generic validation, dispatch, blocking loop |
