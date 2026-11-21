@@ -260,10 +260,13 @@ static void usb_kick(void)
 		thread_wake(usb_tid);
 }
 
+/* Root ports report the Protocol Speed ID: with the default PSI table
+ * 1 full, 2 low, 3 high, 4 SuperSpeed (Gen 1), 5 and up SuperSpeedPlus
+ * (Gen 2, Gen 1x2, Gen 2x2; Intel's 800-series ports report 5). */
 const char *usb_speed_name(uint8_t speed)
 {
 	static const char *const n[] = { "?", "FS", "LS", "HS", "SS" };
-	return n[speed < ARRAY_SIZE(n) ? speed : 0];
+	return speed > XHCI_SPEED_SUPER && speed < 16 ? "SS+" : n[speed < ARRAY_SIZE(n) ? speed : 0];
 }
 
 /* ---------------------------------------------------------------- rings (OpenBSD) */
@@ -646,7 +649,7 @@ static void slot_ctx(struct usb_dev *d, uint32_t *s, unsigned last_dci)
 /* xHCI interval (2^n * 125 us) from bInterval (USB 2.0 9.6.6). */
 static uint32_t ep_interval(uint8_t speed, uint8_t binterval)
 {
-	if (speed == XHCI_SPEED_HIGH || speed == XHCI_SPEED_SUPER)
+	if (speed == XHCI_SPEED_HIGH || speed >= XHCI_SPEED_SUPER)
 		return binterval >= 1 && binterval <= 16 ? binterval - 1u : 3;
 	unsigned frames = binterval ? binterval : 1, n = 3; /* 1 ms = 2^3 * 125 us */
 	while ((1u << (n + 1)) <= frames * 8u && n < 10)
@@ -773,7 +776,7 @@ static bool hub_attach(struct usb_dev *d, const struct rs_usb_iface *hi)
 		kprintf("usb: p%s: hub too deep, ignored\n", d->path);
 		return false;
 	}
-	d->ss_hub = d->t.speed == XHCI_SPEED_SUPER;
+	d->ss_hub = d->t.speed >= XHCI_SPEED_SUPER; /* PSIV 4 Gen 1, 5 Gen 2, ... */
 	if (d->ss_hub && control(d, 0x20, UR_SET_HUB_DEPTH, d->t.depth, 0, 0) != 0)
 		return false; /* its downstream port nibble in the route string */
 	if (control(d, 0xa0, UR_GET_DESCRIPTOR, d->ss_hub ? 0x2a00 : 0x2900, 0, d->ss_hub ? 12 : 71) != 0)
@@ -880,7 +883,7 @@ static struct usb_dev *attach(struct xhci *h, struct usb_dev *parent, uint8_t po
 	usb.attached++;
 
 	/* Address Device with EP0 (xHCI 4.3.3) */
-	uint32_t mps = speed == XHCI_SPEED_SUPER ? 512 : speed == XHCI_SPEED_HIGH ? 64 : 8;
+	uint32_t mps = speed >= XHCI_SPEED_SUPER ? 512 : speed == XHCI_SPEED_HIGH ? 64 : 8;
 	memset(h->in_ctx, 0, PAGE_SIZE);
 	ctx(h, h->in_ctx, 0)[1] = XHCI_INCTX_MASK_DCI(0) | XHCI_INCTX_MASK_DCI(1);
 	slot_ctx(d, ctx(h, h->in_ctx, 1), 1);
@@ -977,7 +980,7 @@ static void hub_port_connect(struct usb_dev *hub, unsigned port)
 	ps = hub_port_status(hub, port);
 	if (ps < 0 || !(ps & UPS_CONNECT))
 		return; /* gone after the reset */
-	uint8_t speed = hub->ss_hub ? XHCI_SPEED_SUPER
+	uint8_t speed = hub->ss_hub ? hub->t.speed
 		      : (ps & UPS_HIGH_SPEED) ? XHCI_SPEED_HIGH
 		      : (ps & UPS_LOW_SPEED) ? XHCI_SPEED_LOW : XHCI_SPEED_FULL;
 	if (hub->t.speed == XHCI_SPEED_FULL && speed == XHCI_SPEED_HIGH)

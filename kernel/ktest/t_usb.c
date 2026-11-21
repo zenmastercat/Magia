@@ -298,3 +298,17 @@ KTEST(078, usb_desktop_topology)
 	KT_ASSERT(ms && ms->mouse && !ms->kbd);
 	KT_EQ(xhci_hc[0].bad_events + xhci_hc[1].bad_events, 0);
 }
+
+/* Speed names for every Protocol Speed ID a root port reports, including
+ * SuperSpeedPlus (5 on Intel 800-series ports), which must not fall back
+ * to full-speed rules. */
+KTEST(079, usb_speed_ids)
+{
+	KT_EQ(strcmp(usb_speed_name(XHCI_SPEED_FULL), "FS"), 0);
+	KT_EQ(strcmp(usb_speed_name(XHCI_SPEED_LOW), "LS"), 0);
+	KT_EQ(strcmp(usb_speed_name(XHCI_SPEED_HIGH), "HS"), 0);
+	KT_EQ(strcmp(usb_speed_name(XHCI_SPEED_SUPER), "SS"), 0);
+	KT_EQ(strcmp(usb_speed_name(5), "SS+"), 0);
+	KT_EQ(strcmp(usb_speed_name(0), "?"), 0);
+	KT_EQ(strcmp(usb_speed_name(200), "?"), 0);
+}

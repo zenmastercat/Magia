@@ -169,3 +169,41 @@ development data (outside the repo).
   hand-over is implemented but only QEMU (already in ACPI mode) tests it.
 - Benchmarks under TCG are meaningless; only KVM numbers are reported,
   and they are Magia-internal until the user-space suite exists.
+
+## Result (stage 2b done)
+
+All milestones are in and `make test` passes from a fresh clone: 177
+host `cargo test`s and the host statistics test; 124 ktests in each of
+eight ktest boots (OVMF, 32 GiB + nox2apic, SeaBIOS, noapic, KVM with
+the benchmarks, the desktop USB shape, the PIT tick, a gated PIT without
+HPET); the monitor runs over serial + PS/2 (FADT flag cleared, ending in
+`reboot`), over a USB keyboard (ending in `poweroff`) and over hub
+keyboards with hot-plug and a mouse; a SeaBIOS poweroff from legacy mode;
+the three crash runs. Deviations from the plan:
+
+- Added on request during the stage (ThinkPad X13 research): the TSC
+  frequency from CPUID 0x15 first, every PIT wait bounded by the TSC
+  (a gated 8254 is logged, not waited for), the LAPIC timer as the tick in
+  `noapic` mode too; test hooks `nopit`, `nohpet`, `nocpuidtsc`,
+  `pittick`. QEMU leaves CPUID 0x15/0x16 at zero (TCG, and KVM even with
+  `+invtsc`), so the 0x15 arithmetic is tested on made-up leaves (ktest
+  055) and QEMU runs exercise the fallbacks.
+- QEMU keeps only Context Entries of the slot context sent with
+  Configure Endpoint, so the hub fields are checked in what Magia sent
+  (ktest 078), not read back.
+- QEMU's USB 3 ports come first: the desktop shape's devices are on
+  xHCI root ports 5-8.
+- SeaBIOS leaves the chipset in legacy mode, which made the SMI_CMD
+  hand-over testable (the "bios poweroff" run).
+- The context-switch benchmark is a sleep/wakeup hand-off, not a yield
+  ping-pong: with EEVDF a yield does not always switch (the first KVM run
+  rejected it). The KVM run pins QEMU to one P-core: unpinned, the 285K's
+  P- and E-cores made one primitive differ by 2x between runs.
+- SuperSpeedPlus root ports (Protocol Speed ID 5, Intel 800-series) were
+  handled as full speed in the first M2 code; found in review, fixed
+  (ktest 079).
+- Not done: the optional PS/2 mouse (TrackPoint/touchpad) on the aux
+  port.
+- Untested on hardware, by the author's decision: everything. QEMU has no
+  high-speed or SuperSpeed hub, so the Transaction Translator fields and
+  the SuperSpeed hub path are tested on made-up trees and by reading only.
