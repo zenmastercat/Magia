@@ -10,14 +10,15 @@ a boot and then describes each subsystem.
             +-------------------- Rust: rust/src (libmagia_rs.a) -------------------+
  syscalls   | syscall table + validation -> Capsicum -> VFS(ramfs,devfs,pipe)      |
  ---------> | jails + accounting, process table, kqueue, rings, futex, sysctl MIB  |
- (ring 3 or | EEVDF policy (rs_sched_*)  ACPI tables (acpi.rs)  USB data (usb.rs)  |
+ (ring 3 or | EEVDF policy (rs_sched_*)  ACPI (acpi.rs, aml.rs)  USB (usb.rs, usbhub.rs) |
   ksyscall) +----------^---------------------------------------^--------------------+
                        | magia_* (rust.h, acpi.h)              | rs_* (rust.h)
  +---------------------+---------------------------------------+-------------------+
  | C: kernel/  boot.c (Limine)  sched.c (threads)  uvm.c (user windows, copyin)     |
  |   pmm.c (buddy)  vmm.c (W^X paging, immutable image)  kmem.c (zones)  rng.c      |
  |   trap.c  cpu.c  timer.c  lapic.c  ioapic.c  hpet.c  pic.c  acpi.c              |
- |   console.c  fbcon.c (Spleen font)  kbd.c  pci.c  xhci.c  monitor.c  ktest/      |
+ |   console.c  klog.c  fbcon.c (Spleen)  kbd.c  pci.c  xhci.c  power.c  hwinfo.c    |
+ |   bench.c  bench_stats.c  monitor.c  ktest/                                      |
  +----------------------------------------------------------------------------------+
  | asm: arch/x86_64/ boot.S isr.S syscall.S switch.S user_blob.S                     |
  +----------------------------------------------------------------------------------+
@@ -69,12 +70,12 @@ All processes share one page table (per-process tables are stage 3).
 | 30000 | `kmem`: kmalloc zones | `kmem.c` |
 | 30001 | `acpi`: Rust parses RSDP -> XSDT -> MADT, HPET, MCFG, FADT | `acpi.c`, `rust/src/acpi.rs` |
 | 40000 | `intr`: 8259 remap+mask, LAPIC, I/O APIC, HPET, TSC and LAPIC timer calibration, tick (or 8259 + PIT with `noapic`) | `timer.c`, `lapic.c`, `ioapic.c`, `hpet.c`, `pic.c` |
-| 40001 | `kbd`: PS/2 keyboard (skipped if the FADT says no 8042) | `kbd.c` |
+| 40001 | `kbd`: PS/2 keyboard (probed even if the FADT says no 8042; bounded) | `kbd.c` |
 | 40002 | `console_input`: COM1 receive interrupt | `console.c` |
 | 40003 | `pci`: ECAM enumeration (bus 0 and bridges), BAR sizing | `pci.c` |
 | 50000 | `sched`: boot thread = tid 1, idle thread = tid 0 | `sched.c` |
 | 50001 | `interrupts_on` | `main.c` |
-| 50002 | `xhci`: USB controller, root-port devices, the boot keyboard, MSI-X | `xhci.c`, `rust/src/usb.rs` |
+| 50002 | `xhci`: every USB controller (MSI-X), the `usb` thread's first scan (hubs, keyboards, mice) | `xhci.c`, `rust/src/usb.rs`, `rust/src/usbhub.rs` |
 | 60000 | `rust`: `rs_init()` - jail 0, process 0, VFS, sysctl tree | `rustglue.c` |
 | 70000 | `syscall`: `EFER.SCE`, `STAR`, `LSTAR`, `SFMASK` | `syscall.c` |
 | 90000 | `vmm_lock`: lock the kernel image (immutable from here on) | `vmm.c` |
@@ -120,13 +121,18 @@ pinned SHA-256.
   MADT start with every pin masked; `irq_enable(irq)` routes ISA IRQs
   through the MADT overrides (polarity, trigger) to the BSP. The 1000 Hz
   tick comes from the **TSC-deadline** timer when the CPU has it (KVM on
-  the target CPU), else the LAPIC timer in periodic mode. TSC and LAPIC
-  timer are calibrated against the **HPET** main counter (PIT channel 2 if
-  there is no HPET). Register names: `include/magia/apicreg.h`, from
-  FreeBSD.
-- **Legacy mode** (`noapic`, or no usable MADT): 8259 + PIT channel 0 at
-  1000 Hz; LAPIC LINT0 is reopened as a virtual wire, because Limine
-  masks every LVT entry.
+  the target CPU), else the LAPIC timer in periodic mode, calibrated
+  against the TSC. The TSC frequency comes from **CPUID 0x15** (Intel,
+  invariant TSC; the SDM's crystal table when the CPU reports 0;
+  cross-checked with leaf 0x16), else the **HPET** main counter, else PIT
+  channel 2 - every PIT wait bounded by the TSC, because laptop firmware
+  may gate the 8254 - else CPUID 0x16, else a logged guess;
+  `kern.tsc_source` says which. Register names:
+  `include/magia/apicreg.h`, from FreeBSD.
+- **Legacy mode** (`noapic`, or no usable MADT): the 8259 for ISA
+  interrupts, LAPIC LINT0 reopened as a virtual wire (Limine masks every
+  LVT entry), and still the LAPIC timer as the tick; PIT channel 0 ticks
+  only without a LAPIC or with `pittick`.
 
 ## Firmware tables (ACPI)
 
@@ -138,8 +144,19 @@ firmware data in the memory map. It validates checksums, lengths
 that overlap the RSDP or root table, skips corrupt optional tables, and
 fills `struct acpi_info` (fixed arrays: 256 CPUs, 16 I/O APICs, 32
 overrides, 8 ECAM windows, 64 tables). MADT semantics follow FreeBSD
-`madt.c`. No ACPICA, no AML: stage 2 needs only static tables (MCFG for
-ECAM, MADT for SMP).
+`madt.c`. No ACPICA and no AML interpreter: from the FADT it also takes
+the reset register, the PM1a/PM1b control blocks (X_ GAS first), SMI_CMD
+and ACPI_ENABLE and the sleep control register, and `rust/src/aml.rs`
+scans the DSDT (then the SSDTs) for `Name(\_S5, Package(){...})` and
+reads the first two integers - the sleep types for poweroff - with every
+offset bounds-checked.
+
+`kernel/power.c` uses them: `reboot` writes the reset register (I/O or
+memory), then falls back to the 8042 reset pulse and a triple fault;
+`poweroff` switches legacy-mode firmware to ACPI mode through SMI_CMD
+(bounded wait for SCI_EN), then writes SLP_TYPa/b and SLP_EN into PM1a
+(and PM1b) control, or the sleep control register on hardware-reduced
+ACPI, each step logged.
 
 ## PCI and USB (stage 2)
 
@@ -165,45 +182,82 @@ ECAM, MADT for SMP).
   Magia drives. Bridges keep it (it only forwards their children's DMA),
   and so do display controllers (an integrated GPU may scan out the boot
   framebuffer). VT-d DMA remapping is planned for stage 4.
-- **xhci.c**: one xHCI controller (the first PCI class 0c/03/30), mostly
+- **xhci.c**: every xHCI controller (PCI class 0c/03/30, up to 4), mostly
   after OpenBSD's driver: BIOS hand-off, Intel port routing, reset,
   device-context array and scratchpad buffers, a command ring and one
-  event ring (one 4 KiB page each, single segment, link TRB). At boot the
-  driver enumerates the root ports synchronously, polling the event ring:
-  port reset, Enable Slot, Address Device, the device descriptor (first
-  8 bytes, EP0 max-packet fix-up, then all 18), the configuration
-  descriptor, and - for the first HID boot keyboard - SET_CONFIGURATION,
-  SET_PROTOCOL(boot), Configure Endpoint and SET_IDLE(0). Then MSI-X (or
-  MSI, or a polling thread) takes over: each transfer event's report goes
-  to Rust, the resulting characters into the console input ring, and the
-  8-byte interrupt-IN transfer is queued again. Event TRBs are checked
-  (type, slot, endpoint, completion code, residual length) and only our
-  own ring addresses are compared, never dereferenced. The interrupt
-  handler takes at most 32 events per interrupt; the rest wait for the
-  next one. The link TRB is handed over (cycle bit, Toggle Cycle) when the
-  producer reaches it. A transfer error halts the keyboard endpoint for
-  good (no reset yet, stage 2b).
-- **Trusted keyboard**: the first device on the lowest-numbered root port
-  that claims to be a HID boot keyboard (class 3, subclass 1, protocol 1)
-  becomes the console keyboard; its keystrokes go straight into the
-  console input ring. Nothing authenticates it, so with physical access a
-  BadUSB-style device on a lower port than the real keyboard can type at
-  `magia>` (as with any USB keyboard). Its VID:PID and port are printed at
-  boot (`xhci: ..., keyboard VID:PID on port N`) and by `usb`.
-- **usb.rs**: device/configuration descriptors and boot reports from the
-  device, parsed in Rust (see TESTING.md for the malformed-input tests).
+  event ring per controller (one 4 KiB page each, single segment, link
+  TRB), each on its own MSI-X (or MSI) vector; the interrupt handler finds
+  its controller by the vector. One kernel thread, `usb`, does all
+  enumeration - the first scan at boot (which `xhci_sysinit` waits for),
+  root-port changes from port-change events, hub port changes from the
+  hubs' status-change endpoints, recovery of halted endpoints, ktest
+  requests - so commands and control transfers never overlap. The
+  interrupt handler only consumes events (at most 32 per interrupt),
+  completes the transfer the thread waits for, hands keyboard and mouse
+  reports to Rust, re-queues interrupt transfers and wakes the thread;
+  with interrupts off as the lock, the thread consumes events the same
+  way while it waits, so it also works polled. A device: Enable Slot,
+  Address Device (slot context with route string, speed, root port, TT
+  hub slot and port for a full/low-speed device below a high-speed hub,
+  MTT), the device descriptor (first 8 bytes, EP0 max-packet fix-up
+  through Evaluate Context, then all 18), the whole configuration (up to
+  4 KiB, parsed in Rust): a hub, or a boot keyboard and/or boot mouse
+  wherever their interfaces are (alternate setting 0); SET_CONFIGURATION,
+  SET_PROTOCOL(boot), one Configure Endpoint for its interrupt-IN
+  endpoints, SET_IDLE(0). Hubs follow OpenBSD's uhub: SET_HUB_DEPTH
+  (SuperSpeed), the hub descriptor (parsed in Rust), SET_INTERFACE to a
+  multi-TT alternate setting, the slot context's Hub/NPORTS/TT think
+  time/MTT with the status endpoint, power every port, wait, then each
+  port: GET_STATUS (parsed in Rust), clear the change bits, detach on a
+  connect change, reset a connected port and attach at the speed it
+  reports. Detach is Disable Slot, the device's pages freed (leaked if
+  Disable Slot fails), recursively below hubs. A transfer error marks the
+  endpoint; the thread resets it (Reset Endpoint if halted,
+  CLEAR_FEATURE(ENDPOINT_HALT) after a stall, Set TR Dequeue Pointer to
+  the enqueue position) and queues again; after 3 errors in a row it is
+  given up. EP0 errors (a stalled request) are recovered the same way at
+  once. Event TRBs are checked (type, slot, endpoint, completion code,
+  residual length) and only our own ring addresses are compared, never
+  dereferenced; events for gone slots count as stale. Every keyboard has
+  its own Rust report state (8 at most).
+- **Trusted keyboards**: every device that claims a HID boot keyboard
+  interface (class 3, subclass 1, protocol 1) becomes a console keyboard;
+  its keystrokes go straight into the console input ring. Nothing
+  authenticates it, so with physical access a BadUSB-style device can
+  type at `magia>` (as with any USB keyboard). Each one is logged at
+  attach (`usb: cN pPATH SPEED VID:PID ...: keyboard`) and listed by `usb`
+  and `hwinfo`.
+- **usb.rs, usbhub.rs**: device/configuration descriptors, boot keyboard
+  and mouse interfaces and reports, hub interfaces, hub descriptors (USB
+  2 and SuperSpeed) and port status from devices, parsed in Rust (see
+  TESTING.md for the malformed-input tests).
 
 ## Consoles and input
 
-- `console.c`: COM1 (16550) is the primary console; every write is copied
-  to `fbcon.c`, a text console on the Limine framebuffer (32 bpp,
+- `console.c`: COM1 (16550) is the primary console; every write also
+  goes into the kernel log (`klog.c`: a 64 KiB ring of bytes, kept from
+  the first boot message; `dmesg [n]` prints it without logging it again)
+  and to `fbcon.c`, a text console on the Limine framebuffer (32 bpp,
   write-combining) with the Spleen 8x16 font from OpenBSD. The console
-  keeps a character grid and a copy of what is on screen and redraws only
-  changed cells, never reading the framebuffer.
+  keeps a ring of 1024 lines (the screen plus the scroll-back), each with
+  an attribute (normal, or the panic header's white on red), and a copy
+  of what is on screen, and redraws only changed cells, never reading the
+  framebuffer. Page Up/Down move the view through the scroll-back; new
+  output returns to the live screen.
+- `panic()` prints the message and the backtrace, then draws the panic
+  screen: a fresh page with a red header (the message, and "photograph
+  this screen") and the newest kernel log lines below it, one per row -
+  the only report a machine without a serial port can give.
+- `hwinfo.c`: CPU, firmware, memory, ACPI facts, every PCI function and
+  every USB controller and device, packed into as many 28-character
+  columns as the screen is wide, on a fresh page.
 - Input: COM1's receive interrupt, the PS/2 keyboard (`kbd.c`, i8042 in
-  translated scancode set 1, `kbd_map.c` US layout) and the USB boot
-  keyboard (`xhci.c` + `usb.rs`) push bytes into one ring that
-  `console_getc_wait()` sleeps on.
+  translated scancode set 1, `kbd_map.c` US layout; probed even when the
+  FADT's 8042 flag is clear, every controller wait bounded to 20 ms by
+  the TSC) and the USB boot keyboards (`xhci.c` + `usb.rs`) push bytes
+  into one ring that `console_getc_wait()` sleeps on. Page Up/Down come
+  in from every source as the VT220 sequences ESC [5~ / ESC [6~, which the
+  monitor decodes.
 
 ## Kernel RNG
 
@@ -298,8 +352,10 @@ entropy (once), RDSEED, RDRAND, TSC jitter. API: `arc4random_buf`,
 | `kenv.rs` | the only path from Rust to C services (`magia_*`); a thread-local mock under `cargo test` |
 | `klock.rs` | `KLock`: IRQ-disabling spinlock (Giant for kernel state; separate SCHED and ACCT locks) |
 | `abi.rs` | `#[repr(C)]` mirror of `include/magia/abi.h`, size-checked against C at boot |
-| `usb.rs` | USB device/configuration descriptors and HID boot-keyboard reports from devices, parsed as untrusted input; reports to ASCII |
-| `acpi.rs` | static ACPI tables (RSDP, XSDT/RSDT, MADT, HPET, MCFG, FADT) parsed as untrusted input; no heap, fixed-size results, fuzzed by host tests |
+| `usb.rs` | USB device/configuration descriptors and HID boot-keyboard reports from devices, parsed as untrusted input; reports to ASCII and VT220 sequences |
+| `acpi.rs` | static ACPI tables (RSDP, XSDT/RSDT, MADT, HPET, MCFG, FADT with its power fields) parsed as untrusted input; no heap, fixed-size results, fuzzed by host tests |
+| `aml.rs` | the `\_S5` package from a DSDT or SSDT (not an AML interpreter), fuzzed |
+| `usbhub.rs` | hub interface, hub descriptors, port status, boot mouse interface and reports from USB devices |
 | `uaccess.rs` | typed `copyin`/`copyout` of user structures and strings (copied once, then validated) |
 | `syscall.rs` | the syscall table: typed argument descriptors, capability-mode flag, generic validation, dispatch, blocking loop |
 | `kernel.rs` | the kernel state struct: processes, jails, open files, VFS, pipes, kqueues, rings |
@@ -326,10 +382,22 @@ Blocking calls register the caller on a wait list, call
 
 ## Debug monitor
 
-`kernel/monitor.c`: a line editor on the console input ring (COM1 and the
-PS/2 keyboard), echoing to serial and the screen. Commands: `help uname
-cpu ps threads jails mem uptime ls cat sysctl echo bt panic reboot
-poweroff`.
+`kernel/monitor.c`: a line editor on the console input ring (COM1, PS/2
+and USB keyboards), echoing to serial and the screen; Page Up/Down scroll
+the screen. Commands: `help uname cpu ps threads jails mem uptime ls cat
+sysctl echo lspci usb hwinfo dmesg bench bt panic reboot poweroff`.
+
+## Benchmarks
+
+`kernel/bench.c` (`bench [n]`, `ktest bench`) runs in a process of its
+own and times kernel primitives with the TSC (lfence; rdtsc; lfence /
+rdtscp; lfence): the empty measurement, `syscall` getpid from ring 3
+(timed in user mode by a blob in `user_blob.S`) and through `ksyscall`,
+a sleep/wakeup hand-off between two threads, timer interrupt to woken
+thread (from the TSC deadline that fired), `vmm_map`/`vmm_unmap`,
+`kmalloc`/`kfree`, `page_alloc`/`page_free`. `bench_stats.c` sorts the
+samples (heapsort) and reports min, median, p99, max and mean, in
+cycles and tenths of ns, as `BENCH` lines (docs/TESTING.md).
 
 ## Planned: block layer and VFS shaped for btrfs (stage 4)
 

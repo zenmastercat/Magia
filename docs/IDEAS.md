@@ -89,6 +89,45 @@ protocol avoids a HID report-descriptor parser. Linux's idea of one input
 core for every keyboard (evdev) appears in miniature: PS/2, USB and serial
 all feed the same console input ring.
 
+### Hubs, hot-plug and halted endpoints (built, stage 2b)
+OpenBSD's uhub(4) (NetBSD heritage, Lennart Augustsson) for the order of
+hub requests (power every port, wait bPwrOn2PwrGood, then per port: clear
+the change bits, detach on any connect change, reset, attach at the
+reported speed) and OpenBSD's xhci(4) for the route string and the TT
+fields of the slot context. One enumeration thread fed by interrupts is
+OpenBSD's usb task thread in miniature. The SET_INTERFACE to a hub's
+multi-TT alternate setting before setting MTT is the USB 2.0
+specification's rule (11.23.1); Linux does the same (idea only).
+
+### Kernel log, scroll-back and a panic screen (built, stage 2b)
+A message buffer every console byte goes through is old Unix (BSD
+`msgbuf`, `dmesg`; Linux `printk` ring). Page Up/Down arrive as the
+VT220 sequences ESC [5~ / [6~ from every input source, as on a serial
+terminal; the full-screen panic report with the newest log lines is the
+idea of Linux's DRM panic screen and of the BSD "panic: ... " console
+dump, built for machines without a serial port.
+
+### Do not trust firmware flags; do not trust the PIT (built, stage 2b)
+Probing the i8042 when the ACPI FADT says there is none: some laptop
+firmware gets the IAPC_BOOT_ARCH bit wrong (the ThinkPad research for
+stage 2b), and a bounded probe costs milliseconds. A gated 8254 on recent Intel chipsets (Linux
+commit c8c4076723da explains it, idea only): TSC frequency from CPUID
+0x15 with the SDM crystal table, then the HPET, PIT waits bounded by the
+TSC, the LAPIC timer as the tick.
+
+### ACPI power without an interpreter (built, stage 2b)
+The `\_S5` package read by a byte scan of the DSDT is what small kernels
+without ACPICA do; the register sequence (reset register; SMI_CMD hand-
+over; SLP_TYP then SLP_EN) follows the ACPI specification and OpenBSD's
+acpi_reset / acpi_sleep_pm. The AML reader is Rust, like every other
+firmware parser.
+
+### Benchmarks (built, stage 2b)
+LMbench (McVoy and Staelin) for the choice of primitives and the
+two-thread hand-off for context switches; Intel's white paper on TSC
+benchmarking for lfence/rdtsc/rdtscp; medians and p99 with the timing
+overhead reported, as the paper plan's statistics rules ask.
+
 ### btrfs-shaped storage interfaces (roadmap)
 btrfs is the stage-4 file system, written from the public on-disk format
 documentation (not from Linux, GRUB, U-Boot or WinBtrfs code). What it

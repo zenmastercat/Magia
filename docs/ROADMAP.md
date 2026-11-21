@@ -22,30 +22,48 @@ and per-milestone tests: [plan-stage1.md](plan-stage1.md).
 
 PCIe enumeration over ECAM (MCFG), BARs, MSI-X/MSI, an xHCI host
 controller and a USB HID boot keyboard on a root port; `lspci`, `usb`.
-Plan and tests: [plan-stage2.md](plan-stage2.md). Still to do on the
-device side, carried into stages 3-4:
+Plan and tests: [plan-stage2.md](plan-stage2.md).
 
-- **USB hubs** (front panels, monitor hubs, many receivers), hot-plug
-  (port-change events), and resetting a halted endpoint (stage 2b); a small
-  usbdi-like layer when the second USB class driver (mass storage) comes.
-- HID report descriptors (non-boot keyboards, mice), key repeat, layouts.
+## Stage 2b (done): real-hardware bring-up
+
+For the author's two machines (an MSI B860 desktop with a Core Ultra 9
+285K, and a ThinkPad X13 Gen 1 Intel), tested only in QEMU until the
+kernel is done (the author's decision). Plan and tests:
+[plan-stage2b.md](plan-stage2b.md); how to try it on the machines later:
+[REAL-HARDWARE.md](REAL-HARDWARE.md).
+
+- Kernel log ring (`dmesg`), scroll-back with Page Up/Down, a full-screen
+  panic report, `hwinfo` (PCI and USB IDs on one screen).
+- Every xHCI controller; hot-plug (port-change events, hub status
+  changes); USB 2/3 hubs with route strings and Transaction Translator
+  fields; several keyboards at once, composite devices; a boot mouse;
+  review F6 (halted endpoints are reset and re-queued, given up after 3
+  errors in a row).
+- i8042 probed even when the FADT says there is none; the TSC frequency
+  from CPUID 0x15, the HPET or a bounded PIT measurement; the LAPIC timer
+  ticks in every mode that has one (laptops may gate the PIT).
+- ACPI reboot (reset register) and poweroff (`\_S5` from AML, PM1
+  control, SMI_CMD hand-over from legacy mode).
+- A kernel-side benchmark harness for the paper (`bench`).
+
+Still to do on the device side, carried into stages 3-4:
+
+- **Untested on the real machines**: everything above runs on QEMU's
+  devices only. QEMU has no high-speed or SuperSpeed hub, so the TT
+  fields (the desktop's keyboard sits behind a high-speed Genesys hub)
+  and the SuperSpeed hub path (SET_HUB_DEPTH, the 0x2a descriptor) are
+  checked by ktests on made-up trees and by reading, not on hardware.
+- Laptop input beyond the keyboard: the TrackPoint and the Elan touchpad
+  (PS/2 aux port; Elantech v4 later), battery, lid and keys through the
+  embedded controller (needs an AML interpreter).
+- A usbdi-like layer when the second USB class driver (mass storage)
+  comes; HID report descriptors (non-boot keyboards and mice, key repeat,
+  layouts); USB Debug Capability (DbC) as a log cable.
 - Interrupt remapping (VT-d) so MSI and I/O APIC messages can target
   APIC ids above 255; legacy INTx would need ACPI `_PRT` (AML).
 - **DMA remapping (VT-d)**, stage 4: today there is none, so W^X and the
   immutable image do not hold against bus-master DMA (see Known gaps).
-- Kernel log in memory (`dmesg`) for machines without serial; a
-  framebuffer panic screen.
-
-## Stage 2b (next): real-hardware bring-up
-
-Kernel log and panic screen, every xHCI controller, hot-plug and hubs,
-ACPI reboot/poweroff (plan kept with the project notes). On the USB side:
-
-- **A halted keyboard endpoint is not reset yet.** One transfer error
-  (a stall, a babble) halts the interrupt-IN endpoint; `xhci.c` counts it
-  (`usb` shows the errors) and stops queueing, so the keyboard is dead
-  until reboot. Stage 2b adds Reset Endpoint + Set TR Dequeue Pointer and
-  re-queues the transfer.
+- The Linux comparison needs the user-space benchmark suite (stage 3).
 
 ## Stage 3: programs (Unix-like userland)
 
@@ -94,7 +112,7 @@ ACPI reboot/poweroff (plan kept with the project notes). On the USB side:
   immutable image hold against DMA too (none today, see Known gaps).
 - Graphics stays the firmware framebuffer (no RTX 5080 driver planned).
 
-## Known gaps after stage 1
+## Known gaps (after stage 2b)
 
 - **No userland, no ELF loader, no `fork`/`exec`.** Processes are kernel
   threads registered in the Rust process table; ring 3 is exercised only by
@@ -104,11 +122,21 @@ ACPI reboot/poweroff (plan kept with the project notes). On the USB side:
 - **Uniprocessor.** The other CPUs (4 in the tests, 24 on the target) stay
   parked in firmware; "interrupts off" is the scheduler lock; Rust state
   sits behind a Giant lock.
-- **Input on the target PC**: only a USB keyboard on a root port works
-  (no hubs, no hot-plug, boot protocol only); untested on the real board.
-- **xHCI**: one keyboard; other USB devices are addressed but unused; DMA
+- **Input on the target machines**: USB boot keyboards and mice on root
+  ports and behind hubs (up to 5 tiers, hub ports 1-15), hot-plugged or
+  not, and the i8042 keyboard; HID boot protocol only; untested on the
+  real machines.
+- **xHCI**: interrupt-IN endpoints only; devices without a class driver
+  are addressed but unused; up to 4 controllers, 64 slots each; DMA
   needs a 64-bit capable controller (every current Intel one is); PCI
   segment 0 only; firmware's bus numbers and BAR assignments are trusted.
+  Every HID boot keyboard is trusted as a console keyboard.
+- **ACPI power without AML execution**: no `_PTS`/`_GTS` before S5 (some
+  firmware wants them); a `\_S5` built by a method is not found
+  (`poweroff` then says so and halts); reset registers in PCI
+  configuration space are not written.
+- **Benchmarks are Magia-internal** (KVM guest numbers); the paper's
+  comparison with Linux needs the stage 3 user-space suite.
 - **No DMA remapping (no VT-d / IOMMU).** Any bus-master device (the
   xHCI, or a hostile PCIe / Thunderbolt device on a physical port) can
   write any RAM: kernel text, page tables, the immutable image. W^X, NX

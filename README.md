@@ -15,7 +15,7 @@ runs on a real desktop PC.
 > source is in [docs/IDEAS.md](docs/IDEAS.md). It is a learning and
 > research project: not secure, not stable, not for real data.
 
-## What it does (stages 1 and 2)
+## What it does (stages 1, 2 and 2b)
 
 - Boots through **Limine** (UEFI and BIOS) from a GPT disk image; the
   kernel is a static **PIE** that Limine relocates and slides (**KASLR**),
@@ -25,14 +25,29 @@ runs on a real desktop PC.
   keyboard, or a **USB keyboard** (stage 2).
 - **PCIe** enumeration over ECAM (MCFG), BAR sizing, **MSI-X/MSI**;
   `lspci` in the monitor.
-- **xHCI USB 3 host controller** with a **HID boot-protocol keyboard**
-  on a root port, interrupts by MSI-X; descriptors and HID reports are
-  parsed in Rust; `usb` in the monitor.
+- **xHCI USB 3 host controllers** (every one on the PCI bus, each on its
+  own MSI-X vector) with **USB 2/3 hubs** (OpenBSD `uhub.c` order, route
+  strings, Transaction Translator fields), **hot-plug**, **several HID
+  boot keyboards** at once (composite devices included), a **boot
+  mouse**, and recovery of halted endpoints; descriptors, hub data and
+  reports are parsed in Rust; `usb` in the monitor (stage 2b).
+- For machines without a serial port (stage 2b): every console byte is
+  kept in a **kernel log** (`dmesg`), the screen scrolls back with Page
+  Up/Down, a **panic screen** shows the newest log lines, and `hwinfo`
+  puts the PCI and USB IDs on one screen to photograph.
+- **ACPI power** (stage 2b): `reboot` through the FADT reset register,
+  `poweroff` through S5 with the `\_S5` sleep type read from the DSDT by a
+  minimal AML reader in Rust.
+- A kernel-side **benchmark harness** (`bench`, `ktest bench`) timing
+  system calls, context switches, interrupt latency, page mapping and the
+  allocators with the TSC (stage 2b; numbers are Magia-internal).
 - ACPI tables (RSDP, XSDT/RSDT, MADT, HPET, MCFG, FADT) parsed **in Rust**
   as untrusted input, fuzzed by host tests.
 - Local APIC (xAPIC and x2APIC), I/O APIC, HPET; 1000 Hz tick from the
-  TSC-deadline timer or the LAPIC timer calibrated against the HPET;
-  `noapic` keeps the legacy 8259 PIC + PIT path.
+  TSC-deadline timer or the LAPIC timer; the TSC frequency from CPUID
+  0x15, the HPET or a bounded PIT measurement (laptops may gate the PIT);
+  `noapic` keeps the legacy 8259 PIC. The i8042 (PS/2) is probed even
+  when the ACPI FADT says there is none.
 - ChaCha20 kernel RNG (arc4random-style, fast key erasure, reseeded from
   RDSEED/RDRAND, TSC jitter and Limine's entropy); the stack-protector
   guard and thread-stack canaries come from it.
@@ -47,11 +62,13 @@ runs on a real desktop PC.
   syscall table with typed validation, **Capsicum**, **jails** with
   hierarchical accounting, VFS (ramfs, devfs, pipes), **kqueue**, an
   io_uring-style ring, **futex**, **sysctl**.
-- 107 in-kernel tests (`ktest`) and 159 host `cargo test`s; `make test`
-  boots the image ten times (OVMF/UEFI, 32 GiB, SeaBIOS, `noapic`, KVM,
-  the monitor over serial + PS/2, the monitor over a USB keyboard, three
-  deliberate crashes). The QEMU machine is q35 with `qemu-xhci` and
-  `usb-kbd`, like the target PC's USB-only input.
+- 123 in-kernel tests (`ktest`), 177 host `cargo test`s and a host C
+  test; `make test` boots the image fifteen times (OVMF/UEFI, 32 GiB,
+  SeaBIOS, `noapic`, the PIT tick, a gated PIT without HPET, KVM with
+  the benchmarks, a desktop-shaped USB machine without PS/2, the monitor
+  over serial + PS/2, over a USB keyboard and over hub keyboards with
+  hot-plug, a SeaBIOS poweroff, three deliberate crashes). The QEMU
+  machine is q35 with `qemu-xhci`, `usb-hub`, `usb-kbd` and `usb-mouse`.
 
 Why two languages: [docs/LANGUAGES.md](docs/LANGUAGES.md).
 
@@ -89,42 +106,26 @@ nix-shell --run 'make test'                 # everything (see docs/TESTING.md)
 
 At the `magia>` prompt: `help`, `uname`, `cpu`, `ps`, `threads`, `jails`,
 `ls /dev`, `cat /etc/motd`, `sysctl`, `mem`, `uptime`, `lspci`, `usb`,
-`poweroff`.
+`hwinfo`, `dmesg`, `bench`, `reboot`, `poweroff`. Page Up/Down scroll the
+screen.
 
-Kernel command line words: `ktest` (run the in-kernel tests and power
-off), `noapic` (8259 PIC + PIT), `nox2apic`, `notscdeadline`, `nohpet`,
-`nokbd` (no PS/2), `noxhci` (no USB), `verbose` (print each boot step).
+Kernel command line words: `ktest` (run the in-kernel tests and exit
+QEMU; with `bench` also the benchmarks), `noapic` (8259 PIC), `pittick`
+(with `noapic`: PIT tick), `nox2apic`, `notscdeadline`, `nohpet`,
+`nopit` (act as if the PIT were gated), `nocpuidtsc`, `nokbd` (no PS/2),
+`fadt8042=0` (act as if the FADT said no i8042), `noxhci` (no USB),
+`verbose` (print each boot step).
 
-## Booting a real PC from a USB stick
+## Real hardware
 
-`make image` only ever writes `build/magia.img`; nothing in the build
-touches a disk. To try Magia on real hardware, write the image to a USB
-stick **yourself**, and only after checking which device is the stick -
-`dd` to the wrong device destroys that disk:
-
-```sh
-lsblk -o NAME,SIZE,MODEL,TRAN,MOUNTPOINTS   # find the stick: TRAN "usb", the size you expect
-# say it is /dev/sdX (NOT a partition like /dev/sdX1, and NOT your system disk);
-# unmount anything mounted from it, then:
-sudo dd if=build/magia.img of=/dev/sdX bs=4M conv=fsync status=progress
-sync
-```
-
-Boot the PC from the stick (UEFI with Secure Boot off, or legacy
-BIOS/CSM). The Limine menu offers the normal boot, `noapic`, and `ktest`.
-
-What should work on the target PC (Core Ultra 9 285K, Z890-class board,
-RTX 5080) since stage 2 - untested on the real machine so far:
-
-- the framebuffer console in the firmware's GOP mode;
-- a **USB keyboard plugged directly into a rear USB port** of the board
-  (the Intel xHCI's root ports), typing at `magia>`; `usb` shows what was
-  found and `lspci` lists the PCIe devices;
-- not yet: keyboards behind a hub (front-panel headers, monitor or
-  keyboard hubs, some wireless receivers) - Magia has no hub driver;
-  keyboards that only speak a report protocol other than the boot
-  protocol; plugging the keyboard in after boot (no hot-plug). If nothing
-  appears, try another rear port and check `usb`.
+Nothing in the build touches a disk; `make image` only writes
+`build/magia.img`. The author decided not to boot Magia on the real
+machines (an MSI B860 desktop with a Core Ultra 9 285K, and a ThinkPad
+X13 Gen 1 Intel) until the kernel is done; until then every device path
+is tested in QEMU with the closest emulated hardware. How to write the
+image to a USB stick, the firmware settings for both machines, and what
+to photograph when something fails are in
+[docs/REAL-HARDWARE.md](docs/REAL-HARDWARE.md).
 
 ## Documentation
 
@@ -135,7 +136,8 @@ RTX 5080) since stage 2 - untested on the real machine so far:
 - [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) - adapted files and their licences
 - [docs/LANGUAGES.md](docs/LANGUAGES.md) - the C/Rust split and why
 - [docs/SYSCALLS.md](docs/SYSCALLS.md) - the system call ABI
-- [docs/plan-stage2.md](docs/plan-stage2.md), [docs/plan-stage1.md](docs/plan-stage1.md), [docs/plan.md](docs/plan.md) - milestone plans
+- [docs/REAL-HARDWARE.md](docs/REAL-HARDWARE.md) - USB stick, firmware settings, what to photograph
+- [docs/plan-stage2b.md](docs/plan-stage2b.md), [docs/plan-stage2.md](docs/plan-stage2.md), [docs/plan-stage1.md](docs/plan-stage1.md), [docs/plan.md](docs/plan.md) - milestone plans
 
 ## License
 
