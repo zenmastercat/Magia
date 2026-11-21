@@ -63,5 +63,15 @@ uint64_t now_ns(void);
 uint64_t tsc_hz(void);
 void delay_ms(uint64_t ms); /* busy wait */
 uint64_t uptime_ms(void);
+const char *tsc_source_name(void); /* kern.tsc_source: cpuid15, hpet, pit, cpuid16, guess */
+struct tsc_cpuid { /* what CPUID says about the TSC */
+	bool intel, invariant;
+	uint32_t max_leaf, family, model;
+	uint32_t den, num, crystal; /* leaf 0x15: EAX, EBX, ECX */
+	uint32_t base_mhz;          /* leaf 0x16 EAX */
+};
+uint64_t tsc_hz_from_cpuid(const struct tsc_cpuid *l); /* Hz, or 0 if unusable */
+extern bool pit_dead;              /* the PIT did not count (gated) */
+extern volatile uint64_t timer_irq_tsc, timer_deadline_tsc; /* newest tick: handler entry, armed deadline */
 
 #endif

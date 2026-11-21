@@ -44,6 +44,8 @@ void lapic_eoi(void);
 uint64_t lapic_timer_calibrate(void (*wait_ms)(uint32_t));
 void lapic_timer_start(uint32_t hz);
 void lapic_timer_rearm(void);       /* TSC-deadline mode: next tick */
+uint64_t lapic_deadline(void);      /* TSC-deadline mode: the deadline armed now, else 0 */
+bool lapic_present(void);           /* probed and usable (every x86-64 CPU) */
 bool cpu_has_x2apic(void);
 bool cpu_has_tsc_deadline(void);
 

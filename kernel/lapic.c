@@ -25,6 +25,7 @@ uint64_t lapic_timer_hz;
 volatile uint64_t lapic_errors;
 static volatile uint32_t *lapic_mmio;
 static uint64_t deadline_step;
+static uint64_t deadline; /* TSC-deadline mode: the deadline armed now */
 
 uint32_t lapic_read(uint32_t reg)
 {
@@ -71,6 +72,8 @@ void lapic_probe(void)
 	if (!lapic_x2 && !(lapic_mmio = vmm_map_mmio(base & APIC_BASE_ADDR, PAGE_SIZE)))
 		panic("lapic: APIC base %p is RAM, refusing to map it", (void *)(base & APIC_BASE_ADDR));
 }
+
+bool lapic_present(void) { return lapic_mmio || lapic_x2; }
 
 /* Legacy mode: LINT0 = ExtINT (the 8259), LINT1 = NMI, APIC enabled. */
 void lapic_virtual_wire(void)
@@ -154,7 +157,8 @@ void lapic_timer_start(uint32_t hz)
 		deadline_step = tsc_hz() / hz;
 		lapic_write(LAPIC_LVT_TIMER, APIC_LVTT_TM_TSCDLT | VEC_LAPIC_TIMER);
 		__asm__ volatile("mfence" ::: "memory"); /* SDM: order the LVT write before the MSR */
-		wrmsr(MSR_TSC_DEADLINE, rdtsc() + deadline_step);
+		deadline = rdtsc() + deadline_step;
+		wrmsr(MSR_TSC_DEADLINE, deadline);
 	} else {
 		lapic_write(LAPIC_DCR_TIMER, APIC_TDCR_16);
 		lapic_write(LAPIC_LVT_TIMER, APIC_LVTT_TM_PERIODIC | VEC_LAPIC_TIMER);
@@ -164,6 +168,10 @@ void lapic_timer_start(uint32_t hz)
 
 void lapic_timer_rearm(void)
 {
-	if (timer_mode == TIMER_TSC_DEADLINE)
-		wrmsr(MSR_TSC_DEADLINE, rdtsc() + deadline_step);
+	if (timer_mode == TIMER_TSC_DEADLINE) {
+		deadline = rdtsc() + deadline_step;
+		wrmsr(MSR_TSC_DEADLINE, deadline);
+	}
 }
+
+uint64_t lapic_deadline(void) { return timer_mode == TIMER_TSC_DEADLINE ? deadline : 0; }

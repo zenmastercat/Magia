@@ -8,6 +8,7 @@
  */
 #include <magia/acpi.h>
 #include <magia/apic.h>
+#include <magia/cpu.h>
 #include <magia/ktest.h>
 #include <magia/trap.h>
 #include <magia/x86.h>
@@ -18,8 +19,10 @@ KTEST(050, interrupt_controller_mode)
 {
 	if (cmdline_has("noapic")) {
 		KT_ASSERT(!apic_mode);
-		KT_EQ(timer_mode, TIMER_PIT);
-		KT_EQ(inb(0x21) & 1, 0); /* PIT line open on the 8259 */
+		/* the PIT ticks only when asked to: a laptop may gate it */
+		bool pit = cmdline_has("pittick");
+		KT_EQ(timer_mode == TIMER_PIT, pit);
+		KT_EQ(inb(0x21) & 1, pit ? 0 : 1); /* PIT line open on the 8259 only then */
 		KT_EQ(lapic_read(LAPIC_LVT_LINT0) & (APIC_LVT_M | APIC_LVT_DM), APIC_LVT_DM_EXTINT);
 		return;
 	}
@@ -49,7 +52,7 @@ KTEST(051, timer_ticks_at_hz)
 	delay_ms(50); /* TSC busy-wait: the tick must keep coming meanwhile */
 	uint64_t dt = ticks - t0;
 	KT_ASSERT(dt >= 25 && dt <= 100);
-	if (apic_mode)
+	if (timer_mode != TIMER_PIT)
 		KT_ASSERT(vec_counts[VEC_LAPIC_TIMER] - v0 >= dt); /* through the LAPIC vector */
 	else
 		KT_EQ(vec_counts[VEC_LAPIC_TIMER], v0);
@@ -58,7 +61,7 @@ KTEST(051, timer_ticks_at_hz)
 KTEST(052, timer_calibration_sanity)
 {
 	KT_ASSERT(tsc_hz() >= 100000000ULL && tsc_hz() <= 20000000000ULL);
-	KT_ASSERT(hpet_present()); /* QEMU q35 has one */
+	KT_EQ(hpet_present(), !cmdline_has("nohpet")); /* QEMU q35 has one */
 	if (!hpet_present())
 		return;
 	KT_ASSERT(hpet_period_fs > 0 && hpet_period_fs <= 100000000ULL);
@@ -109,4 +112,70 @@ KTEST(053, com1_irq_routing)
 	while ((c = console_getc()) >= 0)
 		got |= c == 'Z';
 	KT_ASSERT(got);
+}
+
+/* Where the TSC frequency came from, in the documented order: CPUID 0x15
+ * (Intel, invariant TSC), then the HPET, then the PIT (bounded: a gated
+ * PIT is detected, not waited on forever), then CPUID 0x16, then a guess.
+ * `nopit` pretends the PIT is gated, `nohpet` hides the HPET. */
+KTEST(054, tsc_source_order)
+{
+	const char *s = tsc_source_name();
+	bool known = false;
+	static const char *const names[] = { "cpuid15", "hpet", "pit", "cpuid16", "guess" };
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++)
+		known |= strcmp(s, names[i]) == 0;
+	KT_ASSERT(known);
+	bool c15 = strcmp(s, "cpuid15") == 0;
+	KT_ASSERT(!c15 || cpu_feat.invariant_tsc);
+	if (cmdline_has("nocpuidtsc"))
+		KT_ASSERT(!c15 && strcmp(s, "cpuid16") != 0);
+	if (!c15 && !cmdline_has("nohpet"))
+		KT_ASSERT(strcmp(s, "hpet") == 0);
+	if (cmdline_has("nohpet") && cmdline_has("nopit")) {
+		KT_ASSERT(strcmp(s, "hpet") != 0 && strcmp(s, "pit") != 0);
+		KT_ASSERT(timer_mode != TIMER_PIT); /* the LAPIC timer ticks */
+	}
+	if (cmdline_has("nopit") && !c15 && !hpet_present())
+		KT_ASSERT(pit_dead); /* the bounded wait gave up and said so */
+	/* nothing in the log says the boot waited on a dead PIT for long */
+	KT_ASSERT(ticks > 0);
+}
+
+/* The CPUID 0x15 arithmetic on leaves QEMU does not model (it leaves
+ * 0x15/0x16 zero, even with +invtsc under KVM). */
+KTEST(055, tsc_hz_from_cpuid_leaves)
+{
+	/* ThinkPad X13 Gen 1, i5-10210U (Comet Lake, family 6 model 0x8e):
+	 * crystal 0 -> 24 MHz from the SDM table; 1.6 GHz base */
+	struct tsc_cpuid cml = { true, true, 0x16, 6, 0x8e, 3, 200, 0, 1600 };
+	KT_EQ(tsc_hz_from_cpuid(&cml), 1600000000ULL);
+	/* Core Ultra 9 285K-like: 38.4 MHz crystal reported, 3.7 GHz base */
+	struct tsc_cpuid arl = { true, true, 0x23, 6, 0xc6, 2, 193, 38400000, 3700 };
+	KT_EQ(tsc_hz_from_cpuid(&arl), 3705600000ULL);
+	/* no 0x16: no cross-check, the value stands */
+	struct tsc_cpuid no16 = arl;
+	no16.max_leaf = 0x15;
+	KT_EQ(tsc_hz_from_cpuid(&no16), 3705600000ULL);
+	/* crystal 0, unknown model: derived from the base frequency */
+	struct tsc_cpuid derive = { true, true, 0x16, 6, 0x99, 1, 100, 0, 2500 };
+	KT_EQ(tsc_hz_from_cpuid(&derive), 2500000000ULL);
+	/* the table says 24 MHz but the base frequency disagrees by > 10 %: refused */
+	struct tsc_cpuid wrong = cml;
+	wrong.base_mhz = 1000;
+	KT_EQ(tsc_hz_from_cpuid(&wrong), 0);
+	/* unusable: QEMU's zeros, no invariant TSC, not Intel, old CPU */
+	struct tsc_cpuid qemu = { true, true, 0x23, 6, 0xc6, 0, 0, 0, 0 };
+	KT_EQ(tsc_hz_from_cpuid(&qemu), 0);
+	struct tsc_cpuid var = arl;
+	var.invariant = false;
+	KT_EQ(tsc_hz_from_cpuid(&var), 0);
+	var = arl;
+	var.intel = false;
+	KT_EQ(tsc_hz_from_cpuid(&var), 0);
+	var = arl;
+	var.max_leaf = 0xd;
+	KT_EQ(tsc_hz_from_cpuid(&var), 0);
+	struct tsc_cpuid unknown = { true, true, 0x15, 6, 0x99, 1, 100, 0, 0 };
+	KT_EQ(tsc_hz_from_cpuid(&unknown), 0);
 }

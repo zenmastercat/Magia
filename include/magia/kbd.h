@@ -37,6 +37,7 @@ int kbd_map_selftest(void); /* number of failed checks */
 /* kbd.c */
 extern bool kbd_present;
 extern volatile uint64_t kbd_bytes; /* scancode bytes received */
+extern uint64_t kbd_probe_us;      /* time the i8042 probe took */
 void kbd_init(void);
 
 #endif

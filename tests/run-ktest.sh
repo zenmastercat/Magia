@@ -8,21 +8,29 @@
 # (tests/qemu.sh), q35, -smp 4, -m 8G by default, each with a hard timeout:
 #   1. ktest:   boot with "ktest", run every in-kernel test, parse the
 #               KTEST SUMMARY line, require isa-debug-exit status 33.
-#   2. monitor: boot normally, type commands at the magia> prompt over the
-#               serial line and one over the PS/2 keyboard (QEMU sendkey via
+#   2. monitor: boot with "fadt8042=0" (firmware that clears the FADT 8042
+#               flag), type commands at the magia> prompt over the serial
+#               line and one over the PS/2 keyboard (QEMU sendkey via
 #               tests/hmp.py), check their output, "poweroff".
 #   2b. usbkbd: the same with QEMU's xHCI + usb-kbd: 26 commands (312 keys,
 #               over 600 HID reports) typed on the USB keyboard (QEMU
 #               sendkey) must all run.
+#   2c. desktop: the target desktop's USB shape (qemu.sh QEMU_USB=desktop):
+#               typing through a keyboard behind a hub, hot-plug with
+#               device_add/device_del on a hub port and a root port, mouse.
 #   3. crash:   negative tests of the hardening - each boot must panic with
 #               a specific message (stack protector, thread stack canary,
 #               write to kernel text).
 #   4. bigmem:  boot "ktest nox2apic" with -m 32G (BIGMEM_MEM; falls back to the
 #               largest size QEMU can allocate and says so).
 #   5. bios:    boot "ktest" through SeaBIOS (Limine BIOS stages).
-#   6. noapic:  boot "ktest noapic" (8259 PIC + PIT path).
+#   6. noapic:  boot "ktest noapic" (8259 PIC + LAPIC timer).
 #   7. kvm:     boot "ktest" with -accel kvm -cpu host when /dev/kvm is
 #               usable (x2APIC + TSC-deadline timer); skipped otherwise.
+#   8. more ktest boots, in the background: "desktop" (the desktop USB
+#               shape, no i8042), "legacy" (noapic pittick: the PIT tick),
+#               "nopit" (nopit nohpet: a gated PIT, no HPET; the TSC
+#               frequency falls back and the boot does not hang).
 # Exits non-zero on any failure. Logs go to build/*.log.
 set -u
 
@@ -73,6 +81,23 @@ echo "$crash_cases" | while IFS= read -r case; do
 done &
 crash_pid=$!
 
+# ---------------------------------------------------------------- 8. more ktest boots (in the background)
+# name|command line|environment for qemu.sh|a line the log must contain
+extra_cases="desktop|ktest kt-desktop|QEMU_USB=desktop|kbd: no i8042 (the controller does not respond)
+legacy|ktest noapic pittick||timer: PIT at 1000 Hz
+nopit|ktest nopit nohpet||PIT channel 2 does not count (gated?)"
+echo "$extra_cases" | {
+	while IFS='|' read -r name cmd envs want; do
+		(
+			[ -n "$envs" ] && export $envs
+			qemu "$cmd" </dev/null >"$LOGDIR/ktest-$name.log" 2>&1
+			echo $? >"$LOGDIR/ktest-$name.status"
+		) &
+	done
+	wait
+} &
+extra_pid=$!
+
 # ---------------------------------------------------------------- 1. ktest
 log="$LOGDIR/ktest.log"
 echo "== ktest: booting $IMG through OVMF + Limine (${QEMU_ACCEL:-tcg}, -smp ${QEMU_SMP:-4} -m ${QEMU_MEM:-8G}, ${TIMEOUT}s timeout)"
@@ -102,12 +127,13 @@ rm -f "$sock"
 	sleep 1
 	printf 'poweroff\r'
 	sleep 0.3
-} | QEMU_USB=xhci MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
+} | QEMU_USB=xhci MONITOR="unix:$sock,server,nowait" qemu "monitor fadt8042=0" >"$log" 2>&1
 st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
 mfail=0
-for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "hwinfo | " "1b36:000d 0c0330" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye"; do
+for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "hwinfo | " "1b36:000d 0c0330" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye" \
+	"kbd: FADT says no i8042; probing anyway" "PS/2 keyboard on i8042 (scancode set 1, US layout) although the FADT flag is clear"; do
 	if ! printf '%s\n' "$clean" | grep -qF "$want"; then
 		echo "   missing in monitor output: $want"
 		mfail=1
@@ -279,7 +305,7 @@ check_ktest "$log" $? "bios boot"
 
 # ---------------------------------------------------------------- 6. noapic
 log="$LOGDIR/ktest-noapic.log"
-echo "== noapic: ktest on the legacy 8259 PIC + PIT path"
+echo "== noapic: ktest on the legacy 8259 PIC (LAPIC timer tick)"
 qemu "ktest noapic" </dev/null >"$log" 2>&1
 check_ktest "$log" $? "noapic"
 
@@ -296,6 +322,19 @@ if [ -r /dev/kvm ] && [ -w /dev/kvm ] && [ "${KVM:-1}" = 1 ]; then
 else
 	echo "== kvm: skipped (no usable /dev/kvm)"
 fi
+
+# ---------------------------------------------------------------- 8. more ktest boots (results)
+wait $extra_pid
+while IFS='|' read -r name cmd envs want; do
+	log="$LOGDIR/ktest-$name.log"
+	echo "== $name: $cmd${envs:+ ($envs)}"
+	tr -d '\r' <"$log" | grep -E '^(intr|timer|kbd):' | sed 's/^/   /'
+	check_ktest "$log" "$(cat "$LOGDIR/ktest-$name.status" 2>/dev/null || echo 255)" "$name"
+	tr -d '\r' <"$log" | grep -qF "$want" || { echo "FAIL: $name: missing \"$want\""; fail=1; }
+	rm -f "$LOGDIR/ktest-$name.status"
+done <<EOF
+$extra_cases
+EOF
 
 if [ $fail -ne 0 ]; then
 	echo "run-ktest: FAILED"

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /* t_console.c - ktests for the framebuffer console and the PS/2 keyboard (03x). */
+#include <magia/acpi.h>
 #include <magia/fbcon.h>
 #include <magia/kbd.h>
 #include <magia/ktest.h>
@@ -60,4 +61,20 @@ KTEST(031, kbd_scancode_translation)
 		}
 	/* QEMU q35 has an i8042, except in the desktop-like boot (i8042=off) */
 	KT_EQ(kbd_present, !cmdline_has("kt-desktop"));
+}
+
+/* The i8042 is probed even when the FADT flag is clear (QEMU clears it
+ * with i8042=off; `fadt8042=0` simulates firmware that clears it wrongly),
+ * and a missing controller is given up on quickly. */
+KTEST(032, i8042_probe_ignores_the_fadt_flag)
+{
+	bool desktop = cmdline_has("kt-desktop");
+	bool flag_clear = cmdline_has("fadt8042=0") || ((acpi.found & ACPI_FOUND_FADT) && !acpi.has_8042);
+	KT_EQ(flag_clear, desktop || cmdline_has("fadt8042=0"));
+	if (flag_clear)
+		KT_ASSERT(kt_log_has(0, "kbd: FADT says no i8042; probing anyway"));
+	KT_EQ(kbd_present, !desktop);
+	if (desktop)
+		KT_ASSERT(kt_log_has(0, "kbd: no i8042 (the controller does not respond)"));
+	KT_ASSERT(kbd_probe_us < 100000); /* even with no controller: < 0.1 s */
 }
