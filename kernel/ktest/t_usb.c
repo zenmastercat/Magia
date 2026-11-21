@@ -29,6 +29,27 @@ KTEST(070, xhci_controller_runs_with_msix)
 	KT_ASSERT(vec_counts[xhci.vector] > vec);
 }
 
+/* Review F1: a ring page holds 255 TRBs and a link TRB; 300 No Op
+ * commands, one at a time, must all complete, so the command ring wraps
+ * at least once (QEMU's xHCI checks the link TRB's cycle and TC bits). */
+KTEST(073, xhci_command_ring_wraps)
+{
+	KT_ASSERT(xhci.running && xhci.vector);
+	int done = 0;
+	for (int i = 0; i < 300; i++) {
+		uint64_t cmds = xhci.cmd_events;
+		if (xhci_noop() != 0)
+			break;
+		for (int t = 0; t < 200 && xhci.cmd_events == cmds; t++)
+			thread_sleep_ms(1);
+		if (xhci.cmd_events != cmds + 1)
+			break;
+		done++;
+	}
+	KT_EQ(done, 300);
+	KT_EQ(xhci.bad_events, 0);
+}
+
 KTEST(071, usb_boot_keyboard_attached)
 {
 	KT_ASSERT(xhci.kbd);

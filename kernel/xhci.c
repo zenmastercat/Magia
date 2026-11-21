@@ -137,10 +137,10 @@ static bool ring_init(struct ring *r, bool link)
 		return false;
 	r->index = 0;
 	r->toggle = XHCI_TRB_CYCLE;
-	if (link) { /* one segment: the last TRB links back to the first */
+	if (link) { /* one segment: the last TRB links back to the first; ring_produce hands it over */
 		volatile struct xhci_trb *t = &r->trbs[NTRB - 1];
 		t->trb_paddr = r->pa;
-		t->trb_flags = XHCI_TRB_TYPE_LINK | XHCI_TRB_LINKSEG | XHCI_TRB_CYCLE;
+		t->trb_flags = XHCI_TRB_TYPE_LINK | XHCI_TRB_TC;
 	}
 	return true;
 }
@@ -161,17 +161,16 @@ static volatile struct xhci_trb *ring_consume(struct ring *r)
  * sees a half-written TRB. Returns its physical address. */
 static uint64_t ring_produce(struct ring *r, uint64_t ptr, uint32_t status, uint32_t flags)
 {
-	if (r->index == 0) { /* wrapped: hand the link TRB over with the new cycle */
-		volatile struct xhci_trb *lnk = &r->trbs[NTRB - 1];
-		lnk->trb_flags ^= XHCI_TRB_CYCLE;
-	}
 	volatile struct xhci_trb *t = &r->trbs[r->index];
 	uint64_t pa = r->pa + r->index * sizeof(struct xhci_trb);
 	t->trb_paddr = ptr;
 	t->trb_status = status;
 	__asm__ volatile("" ::: "memory");
 	t->trb_flags = (flags & ~XHCI_TRB_CYCLE) | r->toggle;
-	if (++r->index == NTRB - 1) {
+	if (++r->index == NTRB - 1) { /* at the link TRB: hand it over with this lap's cycle, then wrap (xHCI 4.9.2.2) */
+		volatile struct xhci_trb *lnk = &r->trbs[NTRB - 1];
+		lnk->trb_paddr = r->pa;
+		lnk->trb_flags = XHCI_TRB_TYPE_LINK | XHCI_TRB_TC | r->toggle;
 		r->index = 0;
 		r->toggle ^= 1;
 	}

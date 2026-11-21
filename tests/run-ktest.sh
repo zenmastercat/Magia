@@ -11,8 +11,9 @@
 #   2. monitor: boot normally, type commands at the magia> prompt over the
 #               serial line and one over the PS/2 keyboard (QEMU sendkey via
 #               tests/hmp.py), check their output, "poweroff".
-#   2b. usbkbd: the same with QEMU's xHCI + usb-kbd: a command typed on the
-#               USB keyboard (QEMU sendkey) must run.
+#   2b. usbkbd: the same with QEMU's xHCI + usb-kbd: 26 commands (312 keys,
+#               over 600 HID reports) typed on the USB keyboard (QEMU
+#               sendkey) must all run.
 #   3. crash:   negative tests of the hardening - each boot must panic with
 #               a specific message (stack protector, thread stack canary,
 #               write to kernel text).
@@ -125,7 +126,9 @@ fi
 # ---------------------------------------------------------------- 2b. USB keyboard
 # The target PC has no PS/2: type at magia> through QEMU's usb-kbd behind
 # the xHCI (sendkey goes to the USB keyboard when one is present), then
-# check the command ran and the USB report counter moved.
+# check the commands ran and the USB report counter moved. 26 commands
+# are 312 keys, a press and a release report each, one TRB per report:
+# the keyboard's transfer ring (255 TRBs per lap) wraps twice (review F1).
 log="$LOGDIR/monitor-usb.log"
 echo "== usbkbd: typing at magia> through the xHCI USB keyboard"
 : >"$log"
@@ -137,7 +140,9 @@ rm -f "$sock"
 		i=$((i + 1))
 		[ $i -gt 600 ] && break
 	done
-	python3 -I "$HERE/hmp.py" "$sock" 'type:echo usb-OK\n' >/dev/null
+	keys=
+	for n in $(seq 10 34); do keys="${keys}echo usb-$n\\n"; done
+	python3 -I "$HERE/hmp.py" "$sock" "type:${keys}echo usb-OK\\n" >/dev/null
 	sleep 1
 	printf 'usb\r'
 	sleep 0.5
@@ -148,16 +153,18 @@ st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
 ufail=0
-printf '%s\n' "$clean" | grep -qx 'usb-OK' || { echo "   the command typed on the USB keyboard did not run"; ufail=1; }
+printf '%s\n' "$clean" | grep -qx 'usb-OK' || { echo "   the last command typed on the USB keyboard did not run"; ufail=1; }
+ran=$(printf '%s\n' "$clean" | grep -cx 'usb-[0-9][0-9]')
+[ "$ran" -eq 25 ] || { echo "   $ran of 25 numbered commands typed on the USB keyboard ran"; ufail=1; }
 reports=$(printf '%s\n' "$clean" | sed -n 's/^keyboard: 0627:0001 .*, \([0-9]*\) reports.*/\1/p' | tail -1)
-[ "${reports:-0}" -gt 0 ] || { echo "   no USB keyboard reports counted"; ufail=1; }
+[ "${reports:-0}" -ge 600 ] || { echo "   ${reports:-0} USB keyboard reports counted, expected at least 600"; ufail=1; }
 printf '%s\n' "$clean" | grep -q 'MSI-X vector' || { echo "   xHCI not on MSI-X"; ufail=1; }
 [ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; ufail=1; }
 if [ $ufail -ne 0 ]; then
 	echo "FAIL: USB keyboard test (see $log)"
 	fail=1
 else
-	echo "   usbkbd: 'echo usb-OK' typed on the USB keyboard ran; $reports HID reports over MSI-X"
+	echo "   usbkbd: 26 commands (312 keys) typed on the USB keyboard ran; $reports HID reports over MSI-X"
 fi
 
 # ---------------------------------------------------------------- 3. crash (results)

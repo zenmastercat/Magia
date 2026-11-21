@@ -356,6 +356,7 @@ struct xhci_trb {
 #define XHCI_TRB_CYCLE		(1 << 0) 	/* Enqueue point of xfer ring */
 #define XHCI_TRB_ENT		(1 << 1)	/* Evaluate next TRB */
 #define XHCI_TRB_LINKSEG	XHCI_TRB_ENT	/* Link to next segment */
+#define XHCI_TRB_TC		(1 << 1)	/* Link TRB: toggle cycle (same bit as LINKSEG) */
 #define XHCI_TRB_ISP		(1 << 2)	/* Interrupt on short packet */
 #define XHCI_TRB_NOSNOOP	(1 << 3)	/* PCIe no snoop */
 #define XHCI_TRB_CHAIN		(1 << 4)	/* Chained with next TRB */
