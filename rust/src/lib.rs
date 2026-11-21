@@ -27,6 +27,7 @@ macro_rules! kprint {
 
 pub mod abi;
 pub mod acpi;
+pub mod aml;
 pub mod acct;
 pub mod cap;
 pub mod dbg;

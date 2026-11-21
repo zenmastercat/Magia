@@ -193,3 +193,28 @@ KTEST(021, console_hides_slide_and_firmware_bytes)
 	acpi_sig_printable("FACP", out);
 	KT_EQ(strcmp(out, "FACP"), 0);
 }
+
+/* ACPI power on q35: the FADT reset register (I/O 0xcf9, value 0x0f,
+ * RESET_REG_SUP set), PM1a control at I/O 0x604, and \_S5 = {0, 0} read
+ * from the DSDT's AML by rust/src/aml.rs. The paths themselves run in
+ * tests/run-ktest.sh (the monitor run reboots, the USB runs power off). */
+KTEST(022, acpi_power_fields_q35)
+{
+	KT_EQ(acpi.reset_ok, 1);
+	KT_EQ(acpi.reset_space, ACPI_GAS_IO);
+	KT_EQ(acpi.reset_addr, 0xcf9);
+	KT_EQ(acpi.reset_value, 0x0f);
+	KT_EQ(acpi.pm1a_space, ACPI_GAS_IO);
+	KT_EQ(acpi.pm1a_cnt, 0x604);
+	KT_EQ(acpi.pm1b_cnt, 0);
+	KT_EQ(acpi.s5_found, 1);
+	KT_EQ(acpi.s5_error, 0);
+	KT_EQ(acpi.slp_typa, 0);
+	KT_EQ(acpi.slp_typb, 0);
+	KT_EQ(acpi.hw_reduced, 0);
+	/* OVMF hands over in ACPI mode (SCI_EN set); SeaBIOS leaves legacy
+	 * mode, and poweroff must be able to switch through SMI_CMD */
+	if (bootinfo.firmware != BOOT_FW_BIOS)
+		KT_EQ(inw(0x604) & 1, 1);
+	KT_ASSERT(acpi.smi_cmd != 0 && acpi.acpi_enable != 0);
+}

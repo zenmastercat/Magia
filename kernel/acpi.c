@@ -89,5 +89,9 @@ static void acpi_sysinit(void)
 	if (acpi.found & ACPI_FOUND_FADT)
 		kprintf(", 8042 %s", acpi.has_8042 ? "yes" : "no");
 	kprintf("%s\n", acpi.found & ACPI_FOUND_TRUNCATED ? " (truncated)" : "");
+	if (acpi.found & ACPI_FOUND_FADT) {
+		kprintf("acpi: ");
+		acpi_power_dump();
+	}
 }
 SYSINIT(acpi, 30001, acpi_sysinit); /* after kmem, before interrupts (SI_ORDER_INTR) */

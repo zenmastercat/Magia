@@ -8,6 +8,7 @@
  * (threads, memory) or through the Rust debug helpers (processes, jails,
  * sysctl, files).
  */
+#include <magia/acpi.h>
 #include <magia/cpu.h>
 #include <magia/fbcon.h>
 #include <magia/hwinfo.h>
@@ -79,14 +80,8 @@ static void cmd_echo(int argc, char **argv)
 }
 
 static void cmd_bt(int argc, char **argv) { backtrace_from(read_rbp(), 0); }
-static void cmd_reboot(int argc, char **argv) { machine_reboot(); }
-
-static void cmd_poweroff(int argc, char **argv)
-{
-	kprintf("poweroff: bye\n");
-	qemu_exit(0x10); /* QEMU isa-debug-exit: status 33 */
-	machine_halt();
-}
+static void cmd_reboot(int argc, char **argv) { acpi_reboot(); }
+static void cmd_poweroff(int argc, char **argv) { acpi_poweroff(); }
 
 static void cmd_panic(int argc, char **argv) { panic("requested from the monitor"); }
 static void cmd_lspci(int argc, char **argv) { pci_dump(); }
@@ -127,8 +122,8 @@ static const struct {
 	{ "dmesg", cmd_dmesg, "dmesg [n]: the kernel log (Page Up/Down scroll)" },
 	{ "bt", cmd_bt, "backtrace of the monitor thread" },
 	{ "panic", cmd_panic, "panic the kernel (test the panic path)" },
-	{ "reboot", cmd_reboot, "reset the machine" },
-	{ "poweroff", cmd_poweroff, "exit QEMU (isa-debug-exit)" },
+	{ "reboot", cmd_reboot, "reset the machine (ACPI reset register, 8042, triple fault)" },
+	{ "poweroff", cmd_poweroff, "switch off (ACPI S5)" },
 };
 
 static void cmd_help(int argc, char **argv)

@@ -444,6 +444,12 @@ pub fn parse_mcfg(t: &[u8]) -> Result<Mcfg, AcpiError> {
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Fadt {
     pub revision: u8,
+    pub reset: Option<Gas>,   // RESET_REG, when RESET_REG_SUP is set and the GAS is usable
+    pub reset_value: u8,
+    pub pm1a_cnt: Option<Gas>, // X_PM1a_CNT_BLK, else PM1a_CNT_BLK as I/O
+    pub pm1b_cnt: Option<Gas>,
+    pub acpi_enable: u8,
+    pub sleep_ctl: Option<Gas>, // SLEEP_CONTROL_REG (hardware-reduced ACPI)
     pub sci_irq: u16,
     pub smi_cmd: u32,
     pub pm_tmr_blk: u32,
@@ -456,7 +462,43 @@ pub struct Fadt {
 }
 
 pub const FADT_IAPC_8042: u16 = 1 << 1;
+pub const FADT_RESET_REG_SUP: u32 = 1 << 10;
 pub const FADT_HW_REDUCED: u32 = 1 << 20;
+pub const GAS_MEMORY: u8 = 0;
+pub const GAS_IO: u8 = 1;
+pub const GAS_PCI_CONFIG: u8 = 2;
+
+/// Generic Address Structure (ACPI 6.5 5.2.3.2).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Gas {
+    pub space: u8,
+    pub width: u8,
+    pub offset: u8,
+    pub access: u8,
+    pub addr: u64,
+}
+
+/// A GAS at `off`, if the table holds it, its address is not 0 and its
+/// space is one Magia can write (memory, I/O, PCI configuration).
+fn gas(t: &[u8], off: usize) -> Option<Gas> {
+    let g = Gas { space: rd8(t, off)?, width: rd8(t, off + 1)?, offset: rd8(t, off + 2)?, access: rd8(t, off + 3)?,
+                  addr: rd64(t, off + 4)? };
+    if g.addr == 0 || g.space > GAS_PCI_CONFIG {
+        return None;
+    }
+    if g.space == GAS_IO && g.addr > 0xffff {
+        return None;
+    }
+    Some(g)
+}
+
+/// A legacy PM1x control block: a 16-bit I/O port number (0: none).
+fn io_block(port: u32) -> Option<Gas> {
+    if port == 0 || port > 0xfffe {
+        return None;
+    }
+    Some(Gas { space: GAS_IO, width: 16, offset: 0, access: 2, addr: port as u64 })
+}
 
 /// FADT fields up to `flags` (ACPI 1.0 length, 116 bytes) are required;
 /// IAPC_BOOT_ARCH is read from revision 3 (ACPI 2.0) on, X_DSDT when the
@@ -469,8 +511,18 @@ pub fn parse_fadt(t: &[u8]) -> Result<Fadt, AcpiError> {
     let x_dsdt = if t.len() >= 148 { rd64(t, 140).unwrap_or(0) } else { 0 };
     let dsdt = if x_dsdt != 0 { x_dsdt } else { rd32(t, 40).unwrap_or(0) as u64 };
     let pm_tmr_len = t[91];
+    // ACPI 2.0+ extended blocks win over the 32-bit port numbers
+    let pm1a_cnt = gas(t, 172).or_else(|| io_block(rd32(t, 64).unwrap_or(0)));
+    let pm1b_cnt = gas(t, 184).or_else(|| io_block(rd32(t, 68).unwrap_or(0)));
+    let reset = if flags & FADT_RESET_REG_SUP != 0 { gas(t, 116) } else { None };
     Ok(Fadt {
         revision,
+        reset,
+        reset_value: rd8(t, 128).unwrap_or(0),
+        pm1a_cnt,
+        pm1b_cnt,
+        acpi_enable: rd8(t, 52).unwrap_or(0),
+        sleep_ctl: gas(t, 244),
         sci_irq: rd16(t, 46).unwrap_or(0),
         smi_cmd: rd32(t, 48).unwrap_or(0),
         pm_tmr_blk: if pm_tmr_len == 4 { rd32(t, 76).unwrap_or(0) } else { 0 },
@@ -481,6 +533,24 @@ pub fn parse_fadt(t: &[u8]) -> Result<Fadt, AcpiError> {
         has_8042: iapc & FADT_IAPC_8042 != 0,
         hw_reduced: flags & FADT_HW_REDUCED != 0,
     })
+}
+
+/// `\_S5` from the DSDT, else from the first SSDT that has it.
+fn find_s5(m: &dyn PhysMem, root: &RootTables, dsdt: u64) -> Result<crate::aml::SleepType, crate::aml::AmlError> {
+    let mut err = crate::aml::AmlError::NotFound;
+    if dsdt != 0 {
+        match read_table(m, dsdt, b"DSDT").map(crate::aml::find_s5) {
+            Ok(Ok(s)) => return Ok(s),
+            Ok(Err(e)) => err = e,
+            Err(_) => err = crate::aml::AmlError::BadSignature, // unreadable, bad checksum or length
+        }
+    }
+    for &pa in root.entries.iter().take(root.n) {
+        if let Ok(Ok(s)) = read_table(m, pa, b"SSDT").map(crate::aml::find_s5) {
+            return Ok(s);
+        }
+    }
+    Err(err)
 }
 
 // ---------------------------------------------------------------- C view
@@ -524,6 +594,24 @@ pub struct CAcpiInfo {
     pub has_8042: u32,
     pub ntables: u32,
     pub table_sig: [[u8; 4]; MAX_TABLES],
+    // power (stage 2b): reboot through the reset register, S5 poweroff
+    pub reset_addr: u64,
+    pub pm1a_cnt: u64,
+    pub pm1b_cnt: u64,
+    pub sleep_ctl: u64,
+    pub smi_cmd: u32,
+    pub reset_space: u8,
+    pub reset_value: u8,
+    pub reset_ok: u8,
+    pub pm1a_space: u8,
+    pub pm1b_space: u8,
+    pub sleep_ctl_space: u8,
+    pub acpi_enable: u8,
+    pub hw_reduced: u8,
+    pub s5_found: u8,
+    pub slp_typa: u8,
+    pub slp_typb: u8,
+    pub s5_error: u8, // 0, or AmlError + 1 (where the \_S5 search stopped)
 }
 
 pub const FOUND_MADT: u32 = 1;
@@ -611,6 +699,35 @@ pub fn parse_all(m: &dyn PhysMem, rsdp_pa: u64, bios: bool, out: &mut CAcpiInfo)
         out.sci_irq = f.sci_irq as u32;
         out.pm_tmr_blk = f.pm_tmr_blk;
         out.has_8042 = f.has_8042 as u32;
+        out.smi_cmd = f.smi_cmd;
+        out.acpi_enable = f.acpi_enable;
+        out.hw_reduced = f.hw_reduced as u8;
+        if let Some(g) = f.reset {
+            out.reset_ok = 1;
+            out.reset_addr = g.addr;
+            out.reset_space = g.space;
+            out.reset_value = f.reset_value;
+        }
+        if let Some(g) = f.pm1a_cnt {
+            out.pm1a_cnt = g.addr;
+            out.pm1a_space = g.space;
+        }
+        if let Some(g) = f.pm1b_cnt {
+            out.pm1b_cnt = g.addr;
+            out.pm1b_space = g.space;
+        }
+        if let Some(g) = f.sleep_ctl {
+            out.sleep_ctl = g.addr;
+            out.sleep_ctl_space = g.space;
+        }
+        match find_s5(m, &root, f.dsdt) {
+            Ok(s5) => {
+                out.s5_found = 1;
+                out.slp_typa = s5.slp_typa;
+                out.slp_typb = s5.slp_typb;
+            }
+            Err(e) => out.s5_error = e as u8 + 1,
+        }
     }
     Ok(())
 }
@@ -1023,6 +1140,90 @@ mod tests {
         let f = parse_fadt(&f3).unwrap();
         assert!(!f.has_8042 && f.hw_reduced);
         assert_eq!(parse_fadt(&good_fadt()[..100]).err(), Some(AcpiError::BadLength));
+    }
+
+    /// QEMU q35's power fields: reset register I/O 0xcf9 = 0x0f, PM1a
+    /// control at I/O 0x604 (X_PM1a_CNT_BLK), \_S5 in a DSDT the FADT
+    /// points to.
+    fn power_fadt(dsdt: u64, xgas: bool, reset_sup: bool) -> Vec<u8> {
+        let mut b = vec![0u8; 268 - 36];
+        b[40 - 36..44 - 36].copy_from_slice(&(dsdt as u32).to_le_bytes());
+        b[48 - 36..52 - 36].copy_from_slice(&0xb2u32.to_le_bytes()); // SMI_CMD
+        b[52 - 36] = 0xf1; // ACPI_ENABLE
+        b[64 - 36..68 - 36].copy_from_slice(&0x604u32.to_le_bytes()); // PM1a_CNT_BLK
+        b[89 - 36] = 2; // PM1_CNT_LEN
+        b[109 - 36..111 - 36].copy_from_slice(&FADT_IAPC_8042.to_le_bytes());
+        let flags = if reset_sup { FADT_RESET_REG_SUP } else { 0 };
+        b[112 - 36..116 - 36].copy_from_slice(&flags.to_le_bytes());
+        b[116 - 36..128 - 36].copy_from_slice(&[1, 8, 0, 1, 0xf9, 0x0c, 0, 0, 0, 0, 0, 0]); // RESET_REG
+        b[128 - 36] = 0x0f; // RESET_VALUE
+        if xgas {
+            b[172 - 36..184 - 36].copy_from_slice(&[1, 16, 0, 2, 0x04, 0x06, 0, 0, 0, 0, 0, 0]);
+        }
+        sdt(b"FACP", 5, &b)
+    }
+
+    fn dsdt_with(aml: &[u8]) -> Vec<u8> {
+        let mut body = vec![0x10, 0x05, 0x5c, 0x2e, 0x5f, 0x53]; // some other AML first
+        body.extend_from_slice(aml);
+        sdt(b"DSDT", 2, &body)
+    }
+
+    const S5_Q35: [u8; 12] = [0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00];
+    const S5_77: [u8; 13] = [0x08, 0x5c, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x02, 0x0a, 0x07, 0x0a, 0x07];
+
+    #[test]
+    fn fadt_power_fields_and_s5() {
+        let mut m = machine(&[good_madt(), power_fadt(0x8000, true, true)]);
+        m.put(0x8000, &dsdt_with(&S5_Q35));
+        let mut i = CAcpiInfo::zeroed();
+        parse_all(&m, RSDP, true, &mut i).unwrap();
+        assert_eq!((i.reset_ok, i.reset_space, i.reset_addr, i.reset_value), (1, GAS_IO, 0xcf9, 0x0f));
+        assert_eq!((i.pm1a_cnt, i.pm1a_space, i.pm1b_cnt), (0x604, GAS_IO, 0));
+        assert_eq!((i.smi_cmd, i.acpi_enable, i.hw_reduced), (0xb2, 0xf1, 0));
+        assert_eq!((i.s5_found, i.slp_typa, i.slp_typb, i.s5_error), (1, 0, 0, 0));
+        // legacy PM1a port only, reset register not supported: no reset
+        let mut m = machine(&[power_fadt(0x8000, false, false)]);
+        m.put(0x8000, &dsdt_with(&S5_77));
+        parse_all(&m, RSDP, true, &mut i).unwrap();
+        assert_eq!((i.reset_ok, i.pm1a_cnt, i.pm1a_space), (0, 0x604, GAS_IO));
+        assert_eq!((i.s5_found, i.slp_typa, i.slp_typb), (1, 7, 7));
+    }
+
+    #[test]
+    fn s5_from_ssdt_and_broken_dsdt() {
+        // no \_S5 in the DSDT; an SSDT has it
+        let mut m = machine(&[power_fadt(0x8000, true, true), sdt(b"SSDT", 2, &S5_77)]);
+        m.put(0x8000, &dsdt_with(&[0x5b, 0x80]));
+        let mut i = CAcpiInfo::zeroed();
+        parse_all(&m, RSDP, true, &mut i).unwrap();
+        assert_eq!((i.s5_found, i.slp_typa), (1, 7));
+        // DSDT with a bad checksum, no SSDT: not found, error recorded, FADT still parsed
+        let mut m = machine(&[power_fadt(0x8000, true, true)]);
+        let mut d = dsdt_with(&S5_Q35);
+        d[9] ^= 0x55;
+        m.put(0x8000, &d);
+        parse_all(&m, RSDP, true, &mut i).unwrap();
+        assert_eq!(i.found & FOUND_FADT, FOUND_FADT);
+        assert_eq!((i.s5_found, i.s5_error), (0, crate::aml::AmlError::BadSignature as u8 + 1));
+        assert_eq!(i.reset_ok, 1);
+        // a DSDT pointer into nowhere
+        let m = machine(&[power_fadt(0xdead_0000, true, true)]);
+        parse_all(&m, RSDP, true, &mut i).unwrap();
+        assert_eq!(i.s5_found, 0);
+        // a reset GAS in an unknown space, or I/O above 0xffff, is refused
+        let mut f = power_fadt(0x8000, true, true);
+        f[116] = 9;
+        let t = f.clone();
+        assert_eq!(parse_fadt(&fix(t)).unwrap().reset, None);
+        f[116] = 1;
+        f[120..128].copy_from_slice(&0x1_0000u64.to_le_bytes());
+        assert_eq!(parse_fadt(&fix(f)).unwrap().reset, None);
+    }
+
+    fn fix(mut t: Vec<u8>) -> Vec<u8> {
+        sum_fix(&mut t, 9);
+        t
     }
 
     #[test]

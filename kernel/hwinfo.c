@@ -60,6 +60,7 @@ void hwinfo(void)
 	kprintf("acpi: rev %u, FADT %s, 8042 flag %s, i8042 %s, SCI %u\n", acpi.rsdp_revision,
 		acpi.found & ACPI_FOUND_FADT ? "yes" : "no", acpi.has_8042 ? "set" : "clear",
 		kbd_present ? "keyboard found" : "none", acpi.sci_irq);
+	acpi_power_dump();
 	char t[16];
 	ksnprintf(t, sizeof(t), "PCI (%d):", pci_ndevs);
 	section(t);

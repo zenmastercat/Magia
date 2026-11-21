@@ -11,10 +11,12 @@
 #   2. monitor: boot with "fadt8042=0" (firmware that clears the FADT 8042
 #               flag), type commands at the magia> prompt over the serial
 #               line and one over the PS/2 keyboard (QEMU sendkey via
-#               tests/hmp.py), check their output, "poweroff".
+#               tests/hmp.py), check their output, then "reboot": QEMU
+#               (-no-reboot) must exit through the FADT reset register.
 #   2b. usbkbd: the same with QEMU's xHCI + usb-kbd: 26 commands (312 keys,
 #               over 600 HID reports) typed on the USB keyboard (QEMU
-#               sendkey) must all run.
+#               sendkey) must all run; then "poweroff": ACPI S5 must end
+#               QEMU by itself (run without -no-reboot, so a reset hangs).
 #   2c. desktop: the target desktop's USB shape (qemu.sh QEMU_USB=desktop):
 #               typing through a keyboard behind a hub, hot-plug with
 #               device_add/device_del on a hub port and a root port, mouse.
@@ -125,14 +127,14 @@ rm -f "$sock"
 	done
 	python3 -I "$HERE/hmp.py" "$sock" 'type:echo kbd-OK\n' >/dev/null
 	sleep 1
-	printf 'poweroff\r'
+	printf 'reboot\r'
 	sleep 0.3
 } | QEMU_USB=xhci MONITOR="unix:$sock,server,nowait" qemu "monitor fadt8042=0" >"$log" 2>&1
 st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
 mfail=0
-for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "hwinfo | " "1b36:000d 0c0330" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye" \
+for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "hwinfo | " "1b36:000d 0c0330" "unknown command 'frobnicate'" "magia> echo kbd-OK" "reboot: ACPI reset register (I/O 0xcf9 = 0x0f)" \
 	"kbd: FADT says no i8042; probing anyway" "PS/2 keyboard on i8042 (scancode set 1, US layout) although the FADT flag is clear"; do
 	if ! printf '%s\n' "$clean" | grep -qF "$want"; then
 		echo "   missing in monitor output: $want"
@@ -143,12 +145,14 @@ done
 [ "$(printf "%s\n" "$clean" | grep -c "^pci: ECAM")" -ge 2 ] || { echo "   dmesg did not print the boot log"; mfail=1; }
 # the echo command's own output line, not just the echoed keystrokes
 printf '%s\n' "$clean" | grep -qx 'kbd-OK' || { echo "   keyboard command did not run"; mfail=1; }
-[ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; mfail=1; }
+# -no-reboot: the reset ends QEMU with status 0; the fallback must not have been needed
+printf '%s\n' "$clean" | grep -q 'did not reset' && { echo "   the reset register did not reset"; mfail=1; }
+[ "$st" -eq 0 ] || { echo "   QEMU exit status $st, expected 0 (reset)"; mfail=1; }
 if [ $mfail -ne 0 ]; then
 	echo "FAIL: monitor smoke test (see $log)"
 	fail=1
 else
-	echo "   monitor: 10 commands over serial (hwinfo, dmesg), 1 over the PS/2 keyboard, poweroff exit status 33"
+	echo "   monitor: 10 commands over serial (hwinfo, dmesg), 1 over the PS/2 keyboard (FADT flag cleared); reboot through the ACPI reset register"
 fi
 
 # ---------------------------------------------------------------- 2b. USB keyboard
@@ -176,7 +180,7 @@ rm -f "$sock"
 	sleep 0.5
 	printf 'poweroff\r'
 	sleep 0.3
-} | QEMU_USB=kbd MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
+} | QEMU_USB=kbd QEMU_NOREBOOT=0 MONITOR="unix:$sock,server,nowait" qemu "monitor" >"$log" 2>&1
 st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
@@ -187,12 +191,17 @@ ran=$(printf '%s\n' "$clean" | grep -cx 'usb-[0-9][0-9]')
 reports=$(printf '%s\n' "$clean" | sed -n 's/^c0 p.* 0627:0001 .* kbd: \([0-9]*\) reports.*/\1/p' | tail -1)
 [ "${reports:-0}" -ge 600 ] || { echo "   ${reports:-0} USB keyboard reports counted, expected at least 600"; ufail=1; }
 printf '%s\n' "$clean" | grep -q 'MSI-X vector' || { echo "   xHCI not on MSI-X"; ufail=1; }
-[ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; ufail=1; }
+# ACPI S5: QEMU powers off by itself (status 0); with reboots allowed, a
+# reset instead would hang here until the timeout
+printf '%s\n' "$clean" | grep -qF 'poweroff: ACPI S5 (SLP_TYPa 0 into PM1a control I/O 0x604)' ||
+	{ echo "   poweroff did not take the ACPI S5 path"; ufail=1; }
+printf '%s\n' "$clean" | grep -q 'still running after the S5 write' && { echo "   S5 did not power off"; ufail=1; }
+[ "$st" -eq 0 ] || { echo "   QEMU exit status $st, expected 0 (ACPI poweroff)"; ufail=1; }
 if [ $ufail -ne 0 ]; then
 	echo "FAIL: USB keyboard test (see $log)"
 	fail=1
 else
-	echo "   usbkbd: 26 commands (312 keys) typed on the USB keyboard ran; $reports HID reports over MSI-X"
+	echo "   usbkbd: 26 commands (312 keys) typed on the USB keyboard ran; $reports HID reports over MSI-X; ACPI S5 poweroff"
 fi
 
 # ---------------------------------------------------------------- 2c. desktop USB
@@ -239,7 +248,7 @@ hmp() { python3 -I "$HERE/hmp.py" "$sock" "$@" >/dev/null; }
 	sleep 0.5
 	printf 'poweroff\r'
 	sleep 0.3
-} | QEMU_USB=desktop MONITOR="unix:$sock,server,nowait" qemu "" >"$log" 2>&1
+} | QEMU_USB=desktop QEMU_NOREBOOT=0 MONITOR="unix:$sock,server,nowait" qemu "" >"$log" 2>&1
 st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
@@ -252,7 +261,8 @@ for want in "usb: c1 p7 FS 0409:55aa class 09: hub" "usb: c1 p7.2 FS 0627:0001 c
 	"usb: c1 p6 HS 0627:0001 class 00: keyboard" "kbd: no i8042" "x 30 y -15"; do
 	printf '%s\n' "$clean" | grep -qF "$want" || { echo "   missing in the desktop run: $want"; dfail=1; }
 done
-[ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; dfail=1; }
+printf '%s\n' "$clean" | grep -qF 'poweroff: ACPI S5' || { echo "   poweroff did not take the ACPI S5 path"; dfail=1; }
+[ "$st" -eq 0 ] || { echo "   QEMU exit status $st, expected 0 (ACPI poweroff)"; dfail=1; }
 if [ $dfail -ne 0 ]; then
 	echo "FAIL: desktop USB test (see $log)"
 	fail=1
@@ -302,6 +312,33 @@ log="$LOGDIR/ktest-bios.log"
 echo "== bios: ktest booted through SeaBIOS + Limine BIOS"
 OVMF=bios qemu "ktest" </dev/null >"$log" 2>&1
 check_ktest "$log" $? "bios boot"
+
+# ---------------------------------------------------------------- 5b. BIOS poweroff
+# SeaBIOS leaves the chipset in legacy (non-ACPI) mode: poweroff must
+# switch ACPI on through SMI_CMD before S5 can work.
+log="$LOGDIR/poweroff-bios.log"
+echo "== bios poweroff: ACPI mode through SMI_CMD, then S5"
+: >"$log"
+{
+	i=0
+	while ! grep -q 'magia> ' "$log" 2>/dev/null; do
+		sleep 0.2
+		i=$((i + 1))
+		[ $i -gt 600 ] && break
+	done
+	printf 'poweroff\r'
+	sleep 0.3
+} | OVMF=bios QEMU_USB=none QEMU_NOREBOOT=0 qemu "" >"$log" 2>&1
+st=$?
+clean=$(tr -d '\r' <"$log")
+if printf '%s\n' "$clean" | grep -qF 'enabling ACPI through SMI_CMD' &&
+	printf '%s\n' "$clean" | grep -qF 'poweroff: ACPI S5' &&
+	! printf '%s\n' "$clean" | grep -qE 'did not come on|still running' && [ "$st" -eq 0 ]; then
+	echo "   legacy mode left through SMI_CMD, S5 powered QEMU off (status 0)"
+else
+	echo "FAIL: BIOS poweroff (status $st, see $log)"
+	fail=1
+fi
 
 # ---------------------------------------------------------------- 6. noapic
 log="$LOGDIR/ktest-noapic.log"

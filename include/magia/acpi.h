@@ -58,9 +58,26 @@ struct acpi_info {
 	uint32_t sci_irq, pm_tmr_blk, has_8042;
 	uint32_t ntables;
 	char table_sig[ACPI_MAX_TABLES][4];
+	/* power (stage 2b): reboot through the reset register, poweroff in S5 */
+	uint64_t reset_addr, pm1a_cnt, pm1b_cnt, sleep_ctl;
+	uint32_t smi_cmd;
+	uint8_t reset_space, reset_value, reset_ok;
+	uint8_t pm1a_space, pm1b_space, sleep_ctl_space; /* ACPI_GAS_* */
+	uint8_t acpi_enable, hw_reduced;
+	uint8_t s5_found, slp_typa, slp_typb;
+	uint8_t s5_error; /* 0, or where the \_S5 search stopped (rust/src/aml.rs AmlError + 1) */
 };
 
+#define ACPI_GAS_MEMORY 0
+#define ACPI_GAS_IO 1
+#define ACPI_GAS_PCI_CONFIG 2
+
 extern struct acpi_info acpi;
+
+/* power.c: ACPI reset register / S5, with fallbacks; never return. */
+__noreturn void acpi_reboot(void);
+__noreturn void acpi_poweroff(void);
+void acpi_power_dump(void); /* one line for hwinfo */
 extern int acpi_status; /* 0, or -code from rs_acpi_parse (no ACPI: -100) */
 
 /* Rust: parse the tables reachable from the RSDP into *out (0 or -code);
