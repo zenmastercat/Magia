@@ -71,7 +71,24 @@ struct usb_stats {
 	uint64_t ep_resets;      /* endpoints recovered (Reset Endpoint / Set TR Dequeue) */
 	uint64_t ep0_resets;     /* the same for control endpoints */
 	unsigned ep_dead;        /* endpoints given up after repeated errors */
+	unsigned disable_failures; /* Disable Slot commands that failed */
+	uint64_t leaked_pages;   /* pages kept because the controller may still use them */
+	unsigned attach_refused; /* attaches refused on a controller with too many failures */
+	unsigned connects_limited; /* connect attempts deferred by the rate limit */
 };
+
+/* Connect attempts per port (review 2b L5): at most USB_CONNECT_MAX per
+ * USB_CONNECT_WINDOW_MS, a failed attempt counting twice; then the port
+ * waits for the next window. */
+#define USB_CONNECT_MAX 5
+#define USB_CONNECT_WINDOW_MS 10000
+struct usb_rate {
+	uint64_t start; /* ms: window start */
+	uint8_t count, logged;
+};
+bool usb_connect_allowed(struct usb_rate *r, uint64_t now_ms); /* takes one attempt if allowed */
+void usb_connect_failed(struct usb_rate *r);                    /* the attempt failed: one more */
+bool usb_connect_open(const struct usb_rate *r, uint64_t now_ms); /* would an attempt be allowed? */
 extern struct usb_stats usb;
 
 /* One attached device, for `usb`, hwinfo and ktest. */
@@ -119,7 +136,9 @@ void usb_tt(const struct usb_topo *parent, uint8_t port, uint8_t speed, uint8_t 
 struct usb_test_req {
 	int hc, slot, result;
 	struct rs_usb_dev desc; /* read back after the stall */
+	uint64_t pages;         /* pages the detached devices held */
 };
+void usb_test_disable_failures(void *req); /* detach a root keyboard 3 times with "failing" Disable Slot */
 void usb_test_stall_ep0(void *req);   /* a request QEMU stalls, then GET_DESCRIPTOR */
 void usb_test_stalling_ep(void *req); /* add an interrupt-IN endpoint QEMU stalls */
 

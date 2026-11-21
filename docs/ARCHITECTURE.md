@@ -220,8 +220,14 @@ back to the 8042.
   time/MTT with the status endpoint, power every port, wait, then each
   port: GET_STATUS (parsed in Rust), clear the change bits, detach on a
   connect change, reset a connected port and attach at the speed it
-  reports. Detach is Disable Slot, the device's pages freed (leaked if
-  Disable Slot fails), recursively below hubs. A transfer error marks the
+  reports. Connect attempts are rate-limited per port (5 per 10 s, a
+  failed one counting twice; then the port waits for the next window and
+  is looked at again), so a flapping port or hub cannot keep the thread
+  busy. Detach is Disable Slot and the device's pages freed, recursively
+  below hubs; if Disable Slot fails the pages are kept (the controller may
+  still use them) and counted, and after 3 such failures the controller
+  attaches nothing more until reboot (no controller reset to reclaim
+  them). A transfer error marks the
   endpoint; the thread resets it (Reset Endpoint if halted,
   CLEAR_FEATURE(ENDPOINT_HALT) after a stall, Set TR Dequeue Pointer to
   the enqueue position) and queues again; after 3 errors in a row it is

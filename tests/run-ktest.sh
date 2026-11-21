@@ -19,7 +19,8 @@
 #               QEMU by itself (run without -no-reboot, so a reset hangs).
 #   2c. desktop: the target desktop's USB shape (qemu.sh QEMU_USB=desktop):
 #               typing through a keyboard behind a hub, hot-plug with
-#               device_add/device_del on a hub port and a root port, mouse.
+#               device_add/device_del on a hub port and a root port, mouse,
+#               a flapping root port held back by the connect rate limit.
 #   3. crash:   negative tests of the hardening - each boot must panic with
 #               a specific message (stack protector, thread stack canary,
 #               write to kernel text).
@@ -246,6 +247,19 @@ hmp() { python3 -I "$HERE/hmp.py" "$sock" "$@" >/dev/null; }
 	sleep 2
 	hmp 'type:echo roothot-OK\n' 'mouse_move 10 -5' 'mouse_move 10 -5' 'mouse_move 10 -5'
 	sleep 1
+	# a flapping root port (USB 2 port 1 = root port 5): the connect rate
+	# limit must defer it, and the keyboard left there must work once the
+	# 10 s window has passed (review 2b L5)
+	for n in 1 2 3 4 5 6 7; do
+		hmp "device_add usb-kbd,bus=xhci2.0,port=1,id=kf$n"
+		sleep 0.4
+		hmp "device_del kf$n"
+		sleep 0.3
+	done
+	hmp 'device_add usb-kbd,bus=xhci2.0,port=1,id=kf'
+	sleep 12
+	hmp 'type:echo flap-OK\n'
+	sleep 0.5
 	printf 'usb\r'
 	sleep 0.5
 	printf 'poweroff\r'
@@ -255,12 +269,13 @@ st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
 dfail=0
-for want in hub-OK hubhot-OK hub2-OK root-OK roothot-OK; do
+for want in hub-OK hubhot-OK hub2-OK root-OK roothot-OK flap-OK; do
 	printf '%s\n' "$clean" | grep -qx "$want" || { echo "   '$want' (typed on a USB keyboard) did not run"; dfail=1; }
 done
 for want in "usb: c1 p7 FS 0409:55aa class 09: hub" "usb: c1 p7.2 FS 0627:0001 class 00: keyboard" \
 	"usb: c1 p7.2 0627:0001 detached" "usb: c1 p7.1 0627:0001 detached" "usb: c1 p8 0627:0001 detached" \
-	"usb: c1 p6 HS 0627:0001 class 00: keyboard" "kbd: no i8042" "x 30 y -15"; do
+	"usb: c1 p6 HS 0627:0001 class 00: keyboard" "kbd: no i8042" "x 30 y -15" \
+	"usb: c1 p5: 5 connects within 10 s, waiting before the next"; do
 	printf '%s\n' "$clean" | grep -qF "$want" || { echo "   missing in the desktop run: $want"; dfail=1; }
 done
 printf '%s\n' "$clean" | grep -qF 'poweroff: ACPI S5' || { echo "   poweroff did not take the ACPI S5 path"; dfail=1; }
@@ -269,7 +284,7 @@ if [ $dfail -ne 0 ]; then
 	echo "FAIL: desktop USB test (see $log)"
 	fail=1
 else
-	echo "   desktop: typed through a hub keyboard, a hot-plugged hub-port and root-port keyboard, the root keyboard; 2 detaches seen; mouse moved 30,-15"
+	echo "   desktop: typed through a hub keyboard, a hot-plugged hub-port and root-port keyboard, the root keyboard; 2 detaches seen; mouse moved 30,-15; a flapping port rate-limited, then its keyboard worked"
 fi
 
 # ---------------------------------------------------------------- 3. crash (results)

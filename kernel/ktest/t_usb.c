@@ -312,3 +312,58 @@ KTEST(079, usb_speed_ids)
 	KT_EQ(strcmp(usb_speed_name(0), "?"), 0);
 	KT_EQ(strcmp(usb_speed_name(200), "?"), 0);
 }
+
+/* Review 2b L5: connect attempts per port are rate-limited (5 per 10 s;
+ * a failed attempt costs two), so a flapping port or hub cannot keep the
+ * usb thread busy; the window then opens again. */
+KTEST(081, usb_connect_rate_limit)
+{
+	struct usb_rate r = { 0 };
+	uint64_t t = 123456;
+	for (int i = 0; i < USB_CONNECT_MAX; i++)
+		KT_ASSERT(usb_connect_allowed(&r, t + (uint64_t)i));
+	KT_ASSERT(!usb_connect_allowed(&r, t + 10));
+	KT_ASSERT(!usb_connect_allowed(&r, t + USB_CONNECT_WINDOW_MS - 1));
+	KT_ASSERT(usb_connect_allowed(&r, t + USB_CONNECT_WINDOW_MS)); /* a new window */
+	/* failures back off faster: each failed attempt counts twice */
+	struct usb_rate f = { 0 };
+	int ok = 0;
+	for (int i = 0; i < 10; i++)
+		if (usb_connect_allowed(&f, 5000)) {
+			ok++;
+			usb_connect_failed(&f);
+		}
+	KT_EQ(ok, (USB_CONNECT_MAX + 1) / 2);
+	/* time going backwards (TSC reset) does not lock a port out */
+	struct usb_rate b = { 0 };
+	for (int i = 0; i < USB_CONNECT_MAX; i++)
+		usb_connect_allowed(&b, 50000);
+	KT_ASSERT(usb_connect_allowed(&b, 100));
+}
+
+/* Review 2b L4: when Disable Slot fails the device's pages cannot be
+ * freed (the controller may still use them). They are counted, and after
+ * 3 failures the controller attaches nothing more (logged) instead of
+ * leaking memory under a flapping device. The hook really disables the
+ * slot but treats it as failed, then re-attaches the keyboard. Runs last
+ * among the USB tests: it leaves that controller without a keyboard. */
+KTEST(089, usb_disable_slot_failures_stop_attaching)
+{
+	int n = usb_list(devs, MAXDEV);
+	const struct usb_info *k = NULL;
+	for (int i = 0; i < n && !k; i++)
+		if (devs[i].kbd && devs[i].depth == 0)
+			k = &devs[i];
+	KT_ASSERT(k != NULL);
+	if (!k)
+		return;
+	uint64_t leaked = usb.leaked_pages;
+	struct usb_test_req r = { .hc = k->hc, .slot = k->slot };
+	KT_EQ(usb_call(usb_test_disable_failures, &r), 0);
+	KT_EQ(r.result, 2);                      /* re-attached after the 1st and 2nd failure, not the 3rd */
+	KT_EQ(usb.disable_failures, 3);
+	KT_ASSERT(r.pages >= 3 * 4);            /* context, EP0 ring, keyboard ring and buffer, three times */
+	KT_EQ(usb.leaked_pages - leaked, r.pages);
+	KT_EQ(usb.attach_refused, 1);
+	KT_ASSERT(kt_log_has(0, "Disable Slot failed 3 times"));
+}

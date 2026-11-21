@@ -183,7 +183,10 @@ struct usb_dev {
 	uint8_t hub_ports, hub_ttt;
 	uint16_t power_on_ms;
 	volatile uint32_t hub_change; /* port bitmap from the status-change endpoint */
+	uint32_t hub_deferred;        /* ports waiting for the connect rate limit */
 	struct usb_dev *child[MAX_HUB_PORTS + 1];
+	struct usb_rate port_rate[MAX_HUB_PORTS + 1];
+	bool answered;                /* the device descriptor was read */
 };
 
 struct xhci {
@@ -199,6 +202,10 @@ struct xhci {
 	struct usb_dev *slots[MAX_SLOTS + 1];
 	struct usb_dev **root; /* by root port, 1..nports */
 	volatile uint64_t port_change[4]; /* root ports with a port-change event */
+	uint64_t deferred[4];             /* root ports waiting for the connect rate limit */
+	struct usb_rate *root_rate;       /* by root port */
+	unsigned disable_failures;
+	bool attach_off;                  /* too many Disable Slot failures: attach nothing more */
 	/* the one command or control transfer the usb thread waits for */
 	volatile bool wait_on, wait_done;
 	uint32_t wait_type;
@@ -221,6 +228,7 @@ static struct xhci hcs[USB_MAX_HC];
 static int usb_tid = -1;
 static volatile bool usb_work;
 static uint32_t kbd_ids; /* Rust keyboard states in use */
+static int test_fail_disable; /* ktest: treat the next Disable Slot as failed */
 static void (*volatile call_fn)(void *);
 static void *call_arg;
 static volatile bool call_done;
@@ -267,6 +275,40 @@ const char *usb_speed_name(uint8_t speed)
 {
 	static const char *const n[] = { "?", "FS", "LS", "HS", "SS" };
 	return speed > XHCI_SPEED_SUPER && speed < 16 ? "SS+" : n[speed < ARRAY_SIZE(n) ? speed : 0];
+}
+
+/* Connect rate limit (review 2b L5); pure, ktest 081. */
+static bool rate_reset(const struct usb_rate *r, uint64_t now)
+{
+	return r->count == 0 || now < r->start || now - r->start >= USB_CONNECT_WINDOW_MS;
+}
+
+bool usb_connect_open(const struct usb_rate *r, uint64_t now) { return rate_reset(r, now) || r->count < USB_CONNECT_MAX; }
+
+bool usb_connect_allowed(struct usb_rate *r, uint64_t now)
+{
+	if (rate_reset(r, now))
+		*r = (struct usb_rate){ .start = now };
+	if (r->count >= USB_CONNECT_MAX)
+		return false;
+	r->count++;
+	return true;
+}
+
+void usb_connect_failed(struct usb_rate *r)
+{
+	if (r->count < USB_CONNECT_MAX)
+		r->count++;
+}
+
+static void rate_deferred(struct usb_rate *r, int hc, const char *where, unsigned port)
+{
+	usb.connects_limited++;
+	if (!r->logged) {
+		r->logged = 1;
+		kprintf("usb: c%d p%s%s%u: %u connects within %u s, waiting before the next\n", hc, where,
+			*where ? "." : "", port, USB_CONNECT_MAX, USB_CONNECT_WINDOW_MS / 1000);
+	}
 }
 
 /* ---------------------------------------------------------------- rings (OpenBSD) */
@@ -679,6 +721,10 @@ static void detach(struct usb_dev *d)
 		if (d->child[p])
 			detach(d->child[p]);
 	bool disabled = command(h, 0, 0, XHCI_CMD_DISABLE_SLOT | XHCI_TRB_SET_SLOT(d->t.slot), NULL) == 0;
+	if (disabled && test_fail_disable > 0) { /* ktest 089 */
+		test_fail_disable--;
+		disabled = false;
+	}
 	uint64_t f = irq_save(); /* the interrupt handler looks slots up */
 	h->slots[d->t.slot] = NULL;
 	h->dcbaa[d->t.slot] = 0;
@@ -701,10 +747,23 @@ static void detach(struct usb_dev *d)
 	usb.devices--;
 	usb.detached++;
 	kprintf("usb: c%d p%s %04x:%04x detached\n", (int)(h->st - xhci_hc), d->path, d->desc.vendor, d->desc.product);
-	if (disabled)
+	if (disabled) {
 		free_dev(d);
-	/* shortcut: if Disable Slot failed the controller may still use the
-	 * pages, so they are leaked rather than freed */
+		return;
+	}
+	/* If Disable Slot failed the controller may still use the pages, so
+	 * they are kept, not freed. Counted, and after 3 failures the
+	 * controller attaches nothing more (review 2b L4): a flapping device
+	 * cannot leak memory without bound. shortcut: no controller reset
+	 * (HCRST) to reclaim them; the pages come back at reboot. */
+	unsigned pages = 2 + 2u * (unsigned)d->neps;
+	usb.leaked_pages += pages;
+	usb.disable_failures++;
+	if (++h->disable_failures >= 3 && !h->attach_off) {
+		h->attach_off = true;
+		kprintf("xhci: c%d: Disable Slot failed 3 times (%lu pages kept); attaching nothing more on this "
+			"controller until reboot\n", (int)(h->st - xhci_hc), usb.leaked_pages);
+	}
 }
 
 static struct usb_ep *add_ep(struct usb_dev *d, uint8_t kind, const struct rs_usb_iface *i)
@@ -847,9 +906,18 @@ static struct usb_dev *attach(struct xhci *h, struct usb_dev *parent, uint8_t po
 	uint32_t route = usb_route(parent ? &parent->t : NULL, port);
 	if (route == 0xffffffffu)
 		return NULL;
-	uint8_t slot = 0;
-	if (command(h, 0, 0, XHCI_CMD_ENABLE_SLOT, &slot) != 0 || slot == 0 || slot > MIN(h->st->nslots, MAX_SLOTS))
+	if (h->attach_off) {
+		usb.attach_refused++;
 		return NULL;
+	}
+	uint8_t slot = 0;
+	if (command(h, 0, 0, XHCI_CMD_ENABLE_SLOT, &slot) != 0)
+		return NULL;
+	if (slot == 0 || slot > MIN(h->st->nslots, MAX_SLOTS)) {
+		if (slot) /* not ours to use, but enabled: give it back */
+			command(h, 0, 0, XHCI_CMD_DISABLE_SLOT | XHCI_TRB_SET_SLOT(slot), NULL);
+		return NULL;
+	}
 	struct usb_dev *d = kzalloc(sizeof(*d));
 	if (!d || !(d->ctx = dma_page(&d->ctx_pa)) || !ring_init(&d->ep0)) {
 		if (d)
@@ -909,6 +977,7 @@ static struct usb_dev *attach(struct xhci *h, struct usb_dev *parent, uint8_t po
 	}
 	if (get_desc(d, 1, 18) != 0 || rs_usb_device_desc(h->dma, 18, &d->desc) < 0)
 		goto unused;
+	d->answered = true;
 	if (get_desc(d, 2, 9) != 0)
 		goto unused;
 	int total = rs_usb_config_total(h->dma, 9);
@@ -1017,8 +1086,16 @@ static void hub_explore(struct usb_dev *hub, uint32_t ports)
 			if (hub->child[p])
 				detach(hub->child[p]);
 		}
-		if (connected && !hub->child[p])
+		if (connected && !hub->child[p]) {
+			if (!usb_connect_allowed(&hub->port_rate[p], uptime_ms())) {
+				hub->hub_deferred |= 1u << p;
+				rate_deferred(&hub->port_rate[p], (int)(hub->hc->st - xhci_hc), hub->path, p);
+				continue;
+			}
 			hub_port_connect(hub, p);
+			if (!hub->child[p] || !hub->child[p]->answered)
+				usb_connect_failed(&hub->port_rate[p]);
+		}
 		else if (!connected && hub->child[p])
 			detach(hub->child[p]);
 	}
@@ -1061,11 +1138,18 @@ static void root_explore(struct xhci *h, unsigned port, bool boot)
 	}
 	if (d)
 		return;
+	struct usb_rate *rate = &h->root_rate[port];
+	if (!usb_connect_allowed(rate, uptime_ms())) {
+		h->deferred[port / 64] |= 1ULL << (port % 64);
+		rate_deferred(rate, (int)(h->st - xhci_hc), "", port);
+		return;
+	}
 	if (!boot)
 		delay_ms(100); /* debounce a new connection (USB 2.0 7.1.7.3) */
 	uint32_t ps;
-	if (port_reset(h, port, &ps))
-		attach(h, NULL, (uint8_t)port, (uint8_t)XHCI_PS_SPEED(ps));
+	d = port_reset(h, port, &ps) ? attach(h, NULL, (uint8_t)port, (uint8_t)XHCI_PS_SPEED(ps)) : NULL;
+	if (!d || !d->answered)
+		usb_connect_failed(rate);
 }
 
 /* ---------------------------------------------------------------- the usb thread */
@@ -1098,6 +1182,15 @@ static void recover_eps(struct usb_dev *d)
 
 static void service(struct xhci *h)
 {
+	uint64_t now = uptime_ms();
+	for (unsigned w = 0; w < 4; w++) /* rate-limited ports whose window opened again */
+		for (unsigned b = 0; h->deferred[w] && b < 64; b++)
+			if ((h->deferred[w] & (1ULL << b)) && usb_connect_open(&h->root_rate[w * 64 + b], now)) {
+				h->deferred[w] &= ~(1ULL << b);
+				uint64_t f = irq_save();
+				h->port_change[w] |= 1ULL << b;
+				irq_restore(f);
+			}
 	for (unsigned w = 0; w < 4; w++) {
 		uint64_t f = irq_save();
 		uint64_t bits = h->port_change[w];
@@ -1115,6 +1208,13 @@ static void service(struct xhci *h)
 		if (!d)
 			continue;
 		recover_eps(d);
+		for (unsigned p = 1; d->hub_deferred && p <= MAX_HUB_PORTS; p++)
+			if ((d->hub_deferred & (1u << p)) && usb_connect_open(&d->port_rate[p], now)) {
+				d->hub_deferred &= ~(1u << p);
+				uint64_t f = irq_save();
+				d->hub_change |= 1u << p;
+				irq_restore(f);
+			}
 		if (d->hub && d->hub_change) {
 			uint64_t f = irq_save();
 			uint32_t bits = d->hub_change;
@@ -1255,7 +1355,8 @@ static bool xhci_start(struct xhci *h)
 	h->in_ctx = dma_page(NULL);
 	h->dma = dma_page(NULL);
 	h->root = kzalloc(((size_t)st->nports + 1) * sizeof(h->root[0]));
-	if (!h->dcbaa || !h->erst || !h->in_ctx || !h->dma || !h->root || !ring_init(&h->cmd) || !(h->evt.trbs = dma_page(&h->evt.pa)))
+	h->root_rate = kzalloc(((size_t)st->nports + 1) * sizeof(h->root_rate[0]));
+	if (!h->dcbaa || !h->erst || !h->in_ctx || !h->dma || !h->root || !h->root_rate || !ring_init(&h->cmd) || !(h->evt.trbs = dma_page(&h->evt.pa)))
 		return false;
 	h->evt.index = 0;
 	h->evt.toggle = XHCI_TRB_CYCLE;
@@ -1481,6 +1582,8 @@ void xhci_dump(void)
 		"buttons %x; %lu endpoint errors, %lu resets (%lu EP0), %u given up\n",
 		usb.attached, usb.detached, usb.kbd_reports, usb.kbd_chars, usb.mouse_reports, usb.mouse_x, usb.mouse_y,
 		usb.mouse_buttons, usb.ep_errors, usb.ep_resets, usb.ep0_resets, usb.ep_dead);
+	kprintf("usb: %u connects deferred by the rate limit; %u Disable Slot failures, %lu pages kept, %u attaches refused\n",
+		usb.connects_limited, usb.disable_failures, usb.leaked_pages, usb.attach_refused);
 }
 
 void usb_hwinfo(void)
@@ -1533,6 +1636,29 @@ void usb_test_stalling_ep(void *arg)
 	ep_queue(d, ep);
 	irq_restore(f);
 	r->result = 0;
+}
+
+void usb_test_disable_failures(void *arg)
+{
+	struct usb_test_req *r = arg;
+	struct usb_dev *d = dev_at(r->hc, r->slot);
+	r->result = -ENOENT;
+	r->pages = 0;
+	if (!d || d->parent)
+		return;
+	struct xhci *h = d->hc;
+	uint8_t port = d->t.port;
+	int again = 0;
+	for (int i = 0; i < 3 && d; i++) {
+		r->pages += 2 + 2u * (unsigned)d->neps;
+		test_fail_disable = 1;
+		detach(d);
+		h->root_rate[port] = (struct usb_rate){ 0 }; /* this test is not about the rate limit */
+		root_explore(h, port, true);
+		d = h->root[port];
+		again += d != NULL;
+	}
+	r->result = again;
 }
 
 static void xhci_sysinit(void) { xhci_init(); }
