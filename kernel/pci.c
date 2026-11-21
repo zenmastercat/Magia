@@ -89,6 +89,13 @@ static void scan_function(volatile uint8_t *win, uint8_t bus, uint8_t dev, uint8
 	tmp.subclass = pci_read8(&tmp, PCI_SUBCLASS);
 	tmp.class = pci_read8(&tmp, PCI_CLASS);
 	tmp.header_type = pci_read8(&tmp, PCI_HEADER_TYPE);
+	/* No IOMMU: a function's DMA stays off until a driver needs it
+	 * (xhci_start, pci_enable_msi). Bridges keep it: it only forwards their
+	 * children's DMA, and a driven child may sit behind one.
+	 * shortcut: display controllers keep it too (an integrated GPU may scan
+	 * the boot framebuffer out of RAM); VT-d DMA remapping (stage 4) fences them. */
+	if ((tmp.header_type & 0x7f) == 0 && tmp.class != 0x03)
+		pci_write16(&tmp, PCI_COMMAND, pci_read16(&tmp, PCI_COMMAND) & ~PCI_CMD_MASTER);
 	if (pci_ndevs < PCI_MAX_DEVS) {
 		uint64_t f = irq_save(); /* decoding is briefly off: nothing may print to the framebuffer */
 		pci_read_bars(&tmp);

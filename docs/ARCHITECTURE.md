@@ -154,6 +154,15 @@ ECAM, MADT for SMP).
   entry 0 to the BSP) or MSI, disables INTx; vectors 56-63 are handed out
   and dispatched through the LAPIC like the timer. Legacy INTx is not
   supported: its routing lives in ACPI `_PRT` methods (AML).
+- **No DMA remapping (no VT-d / IOMMU).** A bus-master device can read
+  and write any physical memory, so W^X, NX and the immutable kernel
+  image hold against the CPU only, not against device DMA (a faulty
+  xHCI, a hostile PCIe or Thunderbolt device). As cheap hardening the
+  scan turns bus mastering off on every endpoint function; only
+  `xhci_start()` and `pci_enable_msi()` turn it back on for the device
+  Magia drives. Bridges keep it (it only forwards their children's DMA),
+  and so do display controllers (an integrated GPU may scan out the boot
+  framebuffer). VT-d DMA remapping is planned for stage 4.
 - **xhci.c**: one xHCI controller (the first PCI class 0c/03/30), mostly
   after OpenBSD's driver: BIOS hand-off, Intel port routing, reset,
   device-context array and scratchpad buffers, a command ring and one

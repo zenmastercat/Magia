@@ -138,3 +138,25 @@ KTEST(063, pci_msix_programmed)
 	KT_ASSERT(pci_read16(x, PCI_COMMAND) & PCI_CMD_INTX_OFF);
 	KT_ASSERT(pci_read16(x, PCI_COMMAND) & PCI_CMD_MASTER);
 }
+
+/* Review F2: firmware may leave bus mastering (DMA) on; with no IOMMU,
+ * only functions Magia drives may have it. Bridges and display
+ * controllers keep theirs (see scan_function in pci.c). */
+KTEST(064, pci_bus_master_off_on_undriven_functions)
+{
+	struct pci_dev *x = pci_find_class(0x0c, 0x03, 0x30, 0);
+	int checked = 0, on = 0;
+	for (int i = 0; i < pci_ndevs; i++) {
+		struct pci_dev *d = &pci_devs[i];
+		if (d == x || (d->header_type & 0x7f) != 0 || d->class == 0x03)
+			continue;
+		checked++;
+		if (pci_read16(d, PCI_COMMAND) & PCI_CMD_MASTER) {
+			kprintf("    bus master on: %02x:%02x.%u %04x:%04x\n", d->bus, d->dev, d->fn, d->vendor, d->device);
+			on++;
+		}
+	}
+	KT_ASSERT(checked >= 3); /* q35: host bridge, LPC, SATA, SMBus, NIC */
+	KT_EQ(on, 0);
+	KT_ASSERT(x && (pci_read16(x, PCI_COMMAND) & PCI_CMD_MASTER)); /* the driven xHCI */
+}

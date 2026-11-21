@@ -31,6 +31,8 @@ device side, carried into stages 3-4:
 - HID report descriptors (non-boot keyboards, mice), key repeat, layouts.
 - Interrupt remapping (VT-d) so MSI and I/O APIC messages can target
   APIC ids above 255; legacy INTx would need ACPI `_PRT` (AML).
+- **DMA remapping (VT-d)**, stage 4: today there is none, so W^X and the
+  immutable image do not hold against bus-master DMA (see Known gaps).
 - Kernel log in memory (`dmesg`) for machines without serial; a
   framebuffer panic screen.
 
@@ -76,6 +78,9 @@ device side, carried into stages 3-4:
   the block-layer/VFS shape this implies.
 - **Network**: virtio-net first (QEMU), then the board's Realtek Killer
   E5000 (OpenBSD `if_rge.c`, ISC); FreeBSD's TCP/IP stack.
+- **DMA remapping (VT-d)**: per-device IOMMU page tables, so a
+  bus-master device reaches only its own buffers and W^X and the
+  immutable image hold against DMA too (none today, see Known gaps).
 - Graphics stays the firmware framebuffer (no RTX 5080 driver planned).
 
 ## Known gaps after stage 1
@@ -93,6 +98,13 @@ device side, carried into stages 3-4:
 - **xHCI**: one keyboard; other USB devices are addressed but unused; DMA
   needs a 64-bit capable controller (every current Intel one is); PCI
   segment 0 only; firmware's bus numbers and BAR assignments are trusted.
+- **No DMA remapping (no VT-d / IOMMU).** Any bus-master device (the
+  xHCI, or a hostile PCIe / Thunderbolt device on a physical port) can
+  write any RAM: kernel text, page tables, the immutable image. W^X, NX
+  and the immutable image protect against the CPU only. Bus mastering is
+  turned off on every endpoint function Magia does not drive (bridges and
+  display controllers excepted), which does not stop a hostile device
+  that ignores the bit. VT-d DMA remapping comes in stage 4.
 - **I/O APIC and MSI destinations are 8-bit** (xAPIC format): fine for the
   BSP on QEMU and the target (BSP id 0), not for ids above 254 without
   VT-d interrupt remapping.
