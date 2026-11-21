@@ -207,3 +207,19 @@ the three crash runs. Deviations from the plan:
 - Untested on hardware, by the author's decision: everything. QEMU has no
   high-speed or SuperSpeed hub, so the Transaction Translator fields and
   the SuperSpeed hub path are tested on made-up trees and by reading only.
+
+## Security review (stage 2b)
+
+The review found 0 Critical, 0 High, 1 Medium, 5 Low (its summary said
+4 Low; the report lists L1-L5), 3 Info. Fixed, each with tests: M1 (bus
+master kept only by bridges and the framebuffer's display function; docs
+say the bit is a hint and VT-d is the fix), L1 (128-bit CPUID TSC math,
+plausible range), L2 (object-level `\_S5` walk with a flagged fallback;
+it also found a PkgLength decoding bug in the stage's AML reader), L3
+(power registers range-checked, every page of an MMIO access mapped;
+SMI_CMD 0xb2 allowed below 0x100), L4 (pages of failed Disable Slots
+counted, a controller stops attaching after 3), L5 (connect rate limit
+per port, tested with a flapping QEMU port), I2 (error label). I1 and I3
+needed no change. Not done: a controller reset to reclaim pages kept
+after failed Disable Slots; `\_S5` inside an `If` (the walk skips If
+bodies; the fallback still finds it if the walk gets stuck elsewhere).

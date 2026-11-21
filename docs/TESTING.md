@@ -14,7 +14,7 @@ minute.
 
 ## 1. Host tests of the Rust code (`make cargo-test`)
 
-`cd rust && cargo test --target x86_64-unknown-linux-gnu` (177 tests)
+`cd rust && cargo test --target x86_64-unknown-linux-gnu` (182 tests)
 
 The Rust crate is `no_std` in the kernel but builds with `std` under
 `cfg(test)`. Kernel services (clock, console, user memory, sleeping,

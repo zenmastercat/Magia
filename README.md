@@ -62,7 +62,7 @@ runs on a real desktop PC.
   syscall table with typed validation, **Capsicum**, **jails** with
   hierarchical accounting, VFS (ramfs, devfs, pipes), **kqueue**, an
   io_uring-style ring, **futex**, **sysctl**.
-- 124 in-kernel tests (`ktest`), 177 host `cargo test`s and a host C
+- 128 in-kernel tests (`ktest`), 182 host `cargo test`s and a host C
   test; `make test` boots the image fifteen times (OVMF/UEFI, 32 GiB,
   SeaBIOS, `noapic`, the PIT tick, a gated PIT without HPET, KVM with
   the benchmarks, a desktop-shaped USB machine without PS/2, the monitor
