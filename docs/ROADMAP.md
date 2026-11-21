@@ -26,7 +26,7 @@ Plan and tests: [plan-stage2.md](plan-stage2.md). Still to do on the
 device side, carried into stages 3-4:
 
 - **USB hubs** (front panels, monitor hubs, many receivers), hot-plug
-  (port-change events), and resetting a halted endpoint; a small
+  (port-change events), and resetting a halted endpoint (stage 2b); a small
   usbdi-like layer when the second USB class driver (mass storage) comes.
 - HID report descriptors (non-boot keyboards, mice), key repeat, layouts.
 - Interrupt remapping (VT-d) so MSI and I/O APIC messages can target
@@ -35,6 +35,17 @@ device side, carried into stages 3-4:
   immutable image do not hold against bus-master DMA (see Known gaps).
 - Kernel log in memory (`dmesg`) for machines without serial; a
   framebuffer panic screen.
+
+## Stage 2b (next): real-hardware bring-up
+
+Kernel log and panic screen, every xHCI controller, hot-plug and hubs,
+ACPI reboot/poweroff (plan kept with the project notes). On the USB side:
+
+- **A halted keyboard endpoint is not reset yet.** One transfer error
+  (a stall, a babble) halts the interrupt-IN endpoint; `xhci.c` counts it
+  (`usb` shows the errors) and stops queueing, so the keyboard is dead
+  until reboot. Stage 2b adds Reset Endpoint + Set TR Dequeue Pointer and
+  re-queues the transfer.
 
 ## Stage 3: programs (Unix-like userland)
 

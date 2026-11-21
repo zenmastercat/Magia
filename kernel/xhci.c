@@ -58,12 +58,15 @@
  * wait on the event ring), finds the first HID boot keyboard and starts
  * interrupt-IN transfers on it; afterwards an MSI-X (or MSI) interrupt
  * handles the event ring, hands each report to Rust (rust/src/usb.rs) and
- * re-queues the transfer. Everything the controller or a device writes is
- * checked: event TRB fields (type, slot, endpoint, completion code,
- * pointers into our own rings), transfer lengths, and all descriptors and
- * reports are parsed in Rust.
- * shortcut: no hubs, no hot-plug, one keyboard; stage 3/4 grow a usbdi-like
- * layer for more devices.
+ * re-queues the transfer. Event TRB fields are checked (type, slot,
+ * endpoint, completion code, residual length; pointers are only compared
+ * with our own rings, never dereferenced); device-written data
+ * (descriptors, reports) is parsed in Rust; the controller's DMA is not
+ * restricted (no IOMMU, see docs/ARCHITECTURE.md).
+ * The first HID boot keyboard found is trusted as the console keyboard.
+ * shortcut: no hubs, no hot-plug, one keyboard, and a halted keyboard
+ * endpoint is not reset (Reset Endpoint + Set TR Dequeue Pointer come in
+ * stage 2b); stage 3/4 grow a usbdi-like layer for more devices.
  */
 #include <magia/abi.h>
 #include <magia/acpi.h>
@@ -313,7 +316,10 @@ static void handle_xfer(const struct evt *e)
 		return;
 	}
 	if (e->code != XHCI_CODE_SUCCESS && e->code != XHCI_CODE_SHORT_XFER) {
-		xhci.kbd_errors++; /* shortcut: a halted endpoint is not reset; replug needs stage 3 hot-plug */
+		/* shortcut: the endpoint is now halted and is not reset, so the
+		 * keyboard stays dead until reboot; Reset Endpoint + Set TR Dequeue
+		 * Pointer and a re-queue come in stage 2b */
+		xhci.kbd_errors++;
 		return;
 	}
 	uint16_t asked = (uint16_t)MIN(xhci.kbd_if.ep_max_packet, (uint16_t)REPORT_BUF);

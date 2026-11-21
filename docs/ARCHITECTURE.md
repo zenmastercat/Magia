@@ -178,7 +178,18 @@ ECAM, MADT for SMP).
   to Rust, the resulting characters into the console input ring, and the
   8-byte interrupt-IN transfer is queued again. Event TRBs are checked
   (type, slot, endpoint, completion code, residual length) and only our
-  own ring addresses are compared, never dereferenced.
+  own ring addresses are compared, never dereferenced. The interrupt
+  handler takes at most 32 events per interrupt; the rest wait for the
+  next one. The link TRB is handed over (cycle bit, Toggle Cycle) when the
+  producer reaches it. A transfer error halts the keyboard endpoint for
+  good (no reset yet, stage 2b).
+- **Trusted keyboard**: the first device on the lowest-numbered root port
+  that claims to be a HID boot keyboard (class 3, subclass 1, protocol 1)
+  becomes the console keyboard; its keystrokes go straight into the
+  console input ring. Nothing authenticates it, so with physical access a
+  BadUSB-style device on a lower port than the real keyboard can type at
+  `magia>` (as with any USB keyboard). Its VID:PID and port are printed at
+  boot (`xhci: ..., keyboard VID:PID on port N`) and by `usb`.
 - **usb.rs**: device/configuration descriptors and boot reports from the
   device, parsed in Rust (see TESTING.md for the malformed-input tests).
 
