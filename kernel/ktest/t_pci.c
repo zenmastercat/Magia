@@ -31,7 +31,9 @@ KTEST(060, pci_enumerates_q35)
 	KT_EQ(pci_read16(host, 3), 0xffff);       /* misaligned */
 	KT_EQ(pci_read8(NULL, 0), 0xff);
 	KT_EQ(pci_read16(host, PCI_VENDOR), 0x8086);
-	KT_ASSERT(pci_find_class(0x0c, 0x03, 0x30, 1) == NULL); /* only one xHCI */
+	bool two = cmdline_has("kt-desktop"); /* the desktop-like boot has two xHCIs */
+	KT_EQ(pci_find_class(0x0c, 0x03, 0x30, 1) != NULL, two);
+	KT_ASSERT(pci_find_class(0x0c, 0x03, 0x30, 2) == NULL);
 	KT_ASSERT(strcmp(pci_class_name(0x0c, 0x03), "USB controller") == 0);
 	/* each function appears once */
 	int dups = 0;
@@ -149,7 +151,8 @@ KTEST(064, pci_bus_master_off_on_undriven_functions)
 	int checked = 0, on = 0;
 	for (int i = 0; i < pci_ndevs; i++) {
 		struct pci_dev *d = &pci_devs[i];
-		if (d == x || (d->header_type & 0x7f) != 0 || d->class == 0x03)
+		bool driven = d->class == 0x0c && d->subclass == 0x03 && d->prog_if == 0x30; /* every xHCI */
+		if (driven || (d->header_type & 0x7f) != 0 || d->class == 0x03)
 			continue;
 		checked++;
 		if (pci_read16(d, PCI_COMMAND) & PCI_CMD_MASTER) {

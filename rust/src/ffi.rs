@@ -255,8 +255,11 @@ pub struct CUsbBootKbd {
     _pad: u8,
 }
 
-/// The keyboard's report state; the xHCI interrupt handler is its only user.
-static USB_KBD: KLock<crate::usb::BootKbd> = KLock::new("usbkbd", crate::usb::BootKbd::new());
+/// Report state of each USB keyboard (C hands out the index); the xHCI
+/// interrupt handler is its only user.
+pub const USB_MAX_KBDS: usize = 8;
+static USB_KBD: KLock<[crate::usb::BootKbd; USB_MAX_KBDS]> =
+    KLock::new("usbkbd", [const { crate::usb::BootKbd::new() }; USB_MAX_KBDS]);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rs_usb_max_packet0(b: *const u8, n: usize) -> i32 {
@@ -312,12 +315,92 @@ pub extern "C" fn rs_usb_find_boot_kbd(b: *const u8, n: usize, out: *mut CUsbBoo
     0
 }
 
+/// Keyboard `id`'s report -> ASCII (and VT220 sequences); 0 for a bad id.
 #[unsafe(no_mangle)]
-pub extern "C" fn rs_usb_kbd_report(r: *const u8, n: usize, out: *mut u8, outlen: usize) -> usize {
+pub extern "C" fn rs_usb_kbd_report(id: u32, r: *const u8, n: usize, out: *mut u8, outlen: usize) -> usize {
     if out.is_null() || outlen == 0 {
         return 0;
     }
     // SAFETY: C passes (pointer, length) of its output buffer.
     let out = unsafe { core::slice::from_raw_parts_mut(out, outlen) };
-    USB_KBD.lock().report(bytes(r, n), out)
+    match USB_KBD.lock().get_mut(id as usize) {
+        Some(k) => k.report(bytes(r, n), out),
+        None => 0,
+    }
+}
+
+/// A new keyboard takes slot `id`: forget the previous keyboard's state.
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_kbd_reset(id: u32) {
+    if let Some(k) = USB_KBD.lock().get_mut(id as usize) {
+        *k = crate::usb::BootKbd::new();
+    }
+}
+
+fn put_iface(out: *mut CUsbBootKbd, i: CUsbBootKbd) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    // SAFETY: C passes a pointer to its struct rs_usb_iface.
+    unsafe { *out = i };
+    0
+}
+
+/// The HID boot mouse interface (same C struct as the keyboard's).
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_find_boot_mouse(b: *const u8, n: usize, out: *mut CUsbBootKbd) -> i32 {
+    let Ok(m) = crate::usbhub::find_boot_mouse(bytes(b, n)) else { return -1 };
+    put_iface(out, CUsbBootKbd {
+        config_value: m.config_value,
+        interface: m.interface,
+        alt_setting: 0,
+        ep_addr: m.ep_addr,
+        ep_max_packet: m.ep_max_packet,
+        ep_interval: m.ep_interval,
+        _pad: 0,
+    })
+}
+
+/// The hub interface; the last byte is the multi-TT alternate setting (0xff: none).
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_find_hub(b: *const u8, n: usize, out: *mut CUsbBootKbd) -> i32 {
+    let Ok(h) = crate::usbhub::find_hub(bytes(b, n)) else { return -1 };
+    put_iface(out, CUsbBootKbd {
+        config_value: h.config_value,
+        interface: h.interface,
+        alt_setting: 0,
+        ep_addr: h.ep_addr,
+        ep_max_packet: h.ep_max_packet,
+        ep_interval: h.ep_interval,
+        _pad: h.mtt_alt,
+    })
+}
+
+/// Hub descriptor -> nports | tt_think << 8 | ss << 10 | power_on_ms << 16, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_hub_desc(b: *const u8, n: usize, ss: i32) -> i64 {
+    match crate::usbhub::parse_hub_desc(bytes(b, n), ss != 0) {
+        Ok(d) => d.nports as i64 | (d.tt_think as i64) << 8 | (d.ss as i64) << 10 | (d.power_on_ms as i64) << 16,
+        Err(_) => -1,
+    }
+}
+
+/// GET_STATUS(port) answer -> wPortStatus | wPortChange << 16, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_port_status(b: *const u8, n: usize) -> i64 {
+    match crate::usbhub::parse_port_status(bytes(b, n)) {
+        Ok(s) => s.status as i64 | (s.change as i64) << 16,
+        Err(_) => -1,
+    }
+}
+
+/// Boot mouse report -> buttons | dx << 8 | dy << 16 | wheel << 24 (bytes), or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_usb_mouse_report(r: *const u8, n: usize) -> i64 {
+    match crate::usbhub::parse_mouse_report(bytes(r, n)) {
+        Some(m) => {
+            m.buttons as i64 | (m.dx as u8 as i64) << 8 | (m.dy as u8 as i64) << 16 | (m.wheel as u8 as i64) << 24
+        }
+        None => -1,
+    }
 }

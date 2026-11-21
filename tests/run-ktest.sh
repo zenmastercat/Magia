@@ -158,7 +158,7 @@ ufail=0
 printf '%s\n' "$clean" | grep -qx 'usb-OK' || { echo "   the last command typed on the USB keyboard did not run"; ufail=1; }
 ran=$(printf '%s\n' "$clean" | grep -cx 'usb-[0-9][0-9]')
 [ "$ran" -eq 25 ] || { echo "   $ran of 25 numbered commands typed on the USB keyboard ran"; ufail=1; }
-reports=$(printf '%s\n' "$clean" | sed -n 's/^keyboard: 0627:0001 .*, \([0-9]*\) reports.*/\1/p' | tail -1)
+reports=$(printf '%s\n' "$clean" | sed -n 's/^c0 p.* 0627:0001 .* kbd: \([0-9]*\) reports.*/\1/p' | tail -1)
 [ "${reports:-0}" -ge 600 ] || { echo "   ${reports:-0} USB keyboard reports counted, expected at least 600"; ufail=1; }
 printf '%s\n' "$clean" | grep -q 'MSI-X vector' || { echo "   xHCI not on MSI-X"; ufail=1; }
 [ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; ufail=1; }
@@ -167,6 +167,71 @@ if [ $ufail -ne 0 ]; then
 	fail=1
 else
 	echo "   usbkbd: 26 commands (312 keys) typed on the USB keyboard ran; $reports HID reports over MSI-X"
+fi
+
+# ---------------------------------------------------------------- 2c. desktop USB
+# The target desktop's shape (QEMU_USB=desktop in qemu.sh): no i8042, two
+# xHCIs, a keyboard behind a hub, a second keyboard on a root port, a
+# mouse. sendkey goes to the most recently created keyboard, so the order
+# of typing, device_add and device_del below picks the keyboard: kh
+# (behind the hub), then kh2 hot-plugged on another hub port, kh again
+# after kh2 is removed, kr (root port) after kh is removed, and kr2
+# hot-plugged on a root port after kr is removed.
+log="$LOGDIR/monitor-desktop.log"
+echo "== desktop: two xHCIs, keyboards behind a hub and on a root port, hot-plug, mouse, no i8042"
+: >"$log"
+rm -f "$sock"
+hmp() { python3 -I "$HERE/hmp.py" "$sock" "$@" >/dev/null; }
+{
+	i=0
+	while ! grep -q 'magia> ' "$log" 2>/dev/null; do
+		sleep 0.2
+		i=$((i + 1))
+		[ $i -gt 600 ] && break
+	done
+	hmp 'type:echo hub-OK\n'
+	sleep 0.5
+	hmp 'device_add usb-kbd,bus=xhci2.0,port=3.2,id=kh2'
+	sleep 2
+	hmp 'type:echo hubhot-OK\n'
+	sleep 0.5
+	hmp 'device_del kh2'
+	sleep 1.5
+	hmp 'type:echo hub2-OK\n'
+	sleep 0.5
+	hmp 'device_del kh'
+	sleep 1.5
+	hmp 'type:echo root-OK\n'
+	sleep 0.5
+	hmp 'device_del kr'
+	sleep 1.5
+	hmp 'device_add usb-kbd,bus=xhci2.0,port=2,id=kr2'
+	sleep 2
+	hmp 'type:echo roothot-OK\n' 'mouse_move 10 -5' 'mouse_move 10 -5' 'mouse_move 10 -5'
+	sleep 1
+	printf 'usb\r'
+	sleep 0.5
+	printf 'poweroff\r'
+	sleep 0.3
+} | QEMU_USB=desktop MONITOR="unix:$sock,server,nowait" qemu "" >"$log" 2>&1
+st=$?
+rm -f "$sock"
+clean=$(tr -d '\r' <"$log")
+dfail=0
+for want in hub-OK hubhot-OK hub2-OK root-OK roothot-OK; do
+	printf '%s\n' "$clean" | grep -qx "$want" || { echo "   '$want' (typed on a USB keyboard) did not run"; dfail=1; }
+done
+for want in "usb: c1 p7 FS 0409:55aa class 09: hub" "usb: c1 p7.2 FS 0627:0001 class 00: keyboard" \
+	"usb: c1 p7.2 0627:0001 detached" "usb: c1 p7.1 0627:0001 detached" "usb: c1 p8 0627:0001 detached" \
+	"usb: c1 p6 HS 0627:0001 class 00: keyboard" "kbd: no i8042" "x 30 y -15"; do
+	printf '%s\n' "$clean" | grep -qF "$want" || { echo "   missing in the desktop run: $want"; dfail=1; }
+done
+[ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; dfail=1; }
+if [ $dfail -ne 0 ]; then
+	echo "FAIL: desktop USB test (see $log)"
+	fail=1
+else
+	echo "   desktop: typed through a hub keyboard, a hot-plugged hub-port and root-port keyboard, the root keyboard; 2 detaches seen; mouse moved 30,-15"
 fi
 
 # ---------------------------------------------------------------- 3. crash (results)

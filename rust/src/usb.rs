@@ -110,7 +110,8 @@ pub fn find_boot_keyboard(b: &[u8]) -> Result<BootKeyboard, UsbError> {
                     let class = b[offset + 5];
                     let subclass = b[offset + 6];
                     let protocol = b[offset + 7];
-                    if class == 3 && subclass == 1 && protocol == 1 {
+                    // alternate setting 0 only: the one SET_CONFIGURATION selects
+                    if class == 3 && subclass == 1 && protocol == 1 && b[offset + 3] == 0 {
                         in_keyboard_interface = true;
                         kbd_interface_num = b[offset + 2];
                         kbd_alt_setting = b[offset + 3];
@@ -383,6 +384,27 @@ mod tests {
         b8.extend_from_slice(&[7,5,0x81,3,8,0,7]); // EP first
         b8.extend_from_slice(&[9,4,0,0,1,3,1,1,0]); // Interface
         assert_eq!(find_boot_keyboard(&b8), Err(UsbError::NotFound));
+    }
+
+    /// Composite devices (Keychron K2 Max, Logitech receivers): the boot
+    /// keyboard is wherever its interface is, and only alternate setting 0
+    /// counts (the active one after SET_CONFIGURATION).
+    #[test]
+    fn test_composite_keyboard() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&[9, 2, 0, 0, 3, 1, 0, 0xa0, 50]);
+        b.extend_from_slice(&[9, 4, 0, 0, 1, 3, 0, 0, 0]); // HID, not boot (NKRO / media keys)
+        b.extend_from_slice(&[9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0x40, 0]);
+        b.extend_from_slice(&[7, 5, 0x81, 3, 32, 0, 1]);
+        b.extend_from_slice(&[9, 4, 1, 1, 1, 3, 1, 1, 0]); // boot keyboard, but alt 1
+        b.extend_from_slice(&[7, 5, 0x83, 3, 8, 0, 1]);
+        b.extend_from_slice(&[9, 4, 2, 0, 1, 3, 1, 1, 0]); // boot keyboard, alt 0
+        b.extend_from_slice(&[9, 0x21, 0x11, 0x01, 0, 1, 0x22, 0x3f, 0]);
+        b.extend_from_slice(&[7, 5, 0x82, 3, 8, 0, 10]);
+        let total = b.len() as u16;
+        b[2..4].copy_from_slice(&total.to_le_bytes());
+        let k = find_boot_keyboard(&b).unwrap();
+        assert_eq!((k.interface, k.alt_setting, k.ep_addr, k.ep_interval), (2, 0, 0x82, 10));
     }
 
     #[test]

@@ -166,7 +166,7 @@ KTEST(020, acpi_tables_match_qemu)
 	uint16_t fl;
 	KT_EQ(acpi_isa_gsi(0, &fl), 2); /* the PIT is wired to GSI 2 */
 	KT_EQ(acpi_isa_gsi(4, &fl), 4); /* COM1 identity mapped */
-	KT_EQ(acpi.has_8042, 1);
+	KT_EQ(acpi.has_8042, !cmdline_has("kt-desktop")); /* QEMU clears the flag with i8042=off */
 	/* the parser may only read ACPI memory: RAM and MMIO are refused */
 	KT_ASSERT(magia_acpi_map(bootinfo.rsdp_pa, 20) != NULL);
 	KT_ASSERT(magia_acpi_map(kernel_phys_base, 36) == NULL);
