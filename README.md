@@ -47,7 +47,7 @@ runs on a real desktop PC.
   syscall table with typed validation, **Capsicum**, **jails** with
   hierarchical accounting, VFS (ramfs, devfs, pipes), **kqueue**, an
   io_uring-style ring, **futex**, **sysctl**.
-- 102 in-kernel tests (`ktest`) and 159 host `cargo test`s; `make test`
+- 107 in-kernel tests (`ktest`) and 159 host `cargo test`s; `make test`
   boots the image ten times (OVMF/UEFI, 32 GiB, SeaBIOS, `noapic`, KVM,
   the monitor over serial + PS/2, the monitor over a USB keyboard, three
   deliberate crashes). The QEMU machine is q35 with `qemu-xhci` and
