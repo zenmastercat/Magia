@@ -187,3 +187,30 @@ KTEST(066, pci_ecam_and_mmio_ranges_are_checked)
 	}
 	KT_ASSERT(vmm_map_mmio(virt_to_phys(&pci_ndevs), 4) == NULL); /* the kernel image */
 }
+
+/* Review F5: a 64-bit BAR claimed in the last slot (BAR5) has no high half
+ * and is treated as invalid; a 64-bit BAR in slot 4 is fine. The config
+ * space is RAM, so every sizing read returns all ones (16-byte BARs). */
+KTEST(065, pci_64bit_bar_in_last_slot_is_invalid)
+{
+	uint8_t *cfg = kzalloc(4096);
+	struct pci_dev fake = { .cfg = cfg }; /* header type 0: six BARs */
+	*(uint32_t *)(cfg + PCI_BAR0) = 0xfeb00000;      /* 32-bit memory */
+	*(uint32_t *)(cfg + PCI_BAR0 + 20) = 0xfeb10004; /* BAR5 claims 64-bit */
+	pci_read_bars(&fake);
+	KT_EQ(fake.bar[0].base, 0xfeb00000);
+	KT_EQ(fake.bar[0].size, 16);
+	KT_ASSERT(!fake.bar[0].is64 && !fake.bar[0].io);
+	KT_EQ(fake.bar[5].base, 0);
+	KT_EQ(fake.bar[5].size, 0);
+	KT_EQ(*(uint32_t *)(cfg + PCI_BAR0 + 20), 0xfeb10004); /* restored */
+	/* the same BAR one slot earlier, with BAR5 as its high half */
+	*(uint32_t *)(cfg + PCI_BAR0 + 16) = 0xfeb20004;
+	*(uint32_t *)(cfg + PCI_BAR0 + 20) = 0;
+	pci_read_bars(&fake);
+	KT_ASSERT(fake.bar[4].is64 && !fake.bar[4].io);
+	KT_EQ(fake.bar[4].base, 0xfeb20000);
+	KT_EQ(fake.bar[4].size, 16);
+	KT_EQ(fake.bar[5].size, 0);
+	kfree(cfg);
+}

@@ -221,9 +221,11 @@ void pci_read_bars(struct pci_dev *d)
 			b->size = m ? (~m & 0xffff) + 1 : 0;
 			continue;
 		}
+		if (((lo >> 1) & 3) == 2 && i + 1 >= nbars)
+			continue; /* 64-bit in the last slot: no high half, malformed; size 0 */
 		b->prefetch = (lo >> 3) & 1;
 		uint64_t base = lo & ~0xfu, mask = (uint64_t)(mlo & ~0xfu) | 0xffffffff00000000ULL;
-		if (((lo >> 1) & 3) == 2 && i + 1 < nbars) { /* 64-bit: the next BAR is the high half */
+		if (((lo >> 1) & 3) == 2) { /* 64-bit: the next BAR is the high half */
 			uint32_t hi = pci_read32(d, off + 4);
 			pci_write32(d, off + 4, 0xffffffffu);
 			uint32_t mhi = pci_read32(d, off + 4);
