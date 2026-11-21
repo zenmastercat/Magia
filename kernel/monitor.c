@@ -9,6 +9,7 @@
  * sysctl, files).
  */
 #include <magia/acpi.h>
+#include <magia/bench.h>
 #include <magia/cpu.h>
 #include <magia/fbcon.h>
 #include <magia/hwinfo.h>
@@ -88,6 +89,19 @@ static void cmd_lspci(int argc, char **argv) { pci_dump(); }
 static void cmd_usb(int argc, char **argv) { xhci_dump(); }
 static void cmd_hwinfo(int argc, char **argv) { hwinfo(); }
 
+static void cmd_bench(int argc, char **argv)
+{
+	bool ok = true;
+	long n = argc > 1 ? katol(argv[1], &ok) : 2000;
+	if (!ok || n < BENCH_MIN_N || n > BENCH_MAX_N) {
+		kprintf("usage: bench [n]   (%d <= n <= %d samples per primitive)\n", BENCH_MIN_N, BENCH_MAX_N);
+		return;
+	}
+	int r = bench_run((unsigned)n);
+	if (r)
+		kprintf("bench: error %d\n", r);
+}
+
 static void cmd_dmesg(int argc, char **argv)
 {
 	bool ok = true;
@@ -120,6 +134,7 @@ static const struct {
 	{ "usb", cmd_usb, "xHCI ports and the USB keyboard" },
 	{ "hwinfo", cmd_hwinfo, "PCI and USB IDs on one screen (photograph it)" },
 	{ "dmesg", cmd_dmesg, "dmesg [n]: the kernel log (Page Up/Down scroll)" },
+	{ "bench", cmd_bench, "bench [n]: time kernel primitives (TSC), BENCH lines" },
 	{ "bt", cmd_bt, "backtrace of the monitor thread" },
 	{ "panic", cmd_panic, "panic the kernel (test the panic path)" },
 	{ "reboot", cmd_reboot, "reset the machine (ACPI reset register, 8042, triple fault)" },

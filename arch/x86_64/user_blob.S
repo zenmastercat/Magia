@@ -128,3 +128,46 @@ ublob_sgdt:
 	syscall
 	ud2
 ublob_sgdt_end:
+
+/*
+ * Benchmark (kernel/bench.c): the null system call from ring 3, timed in
+ * user mode as a user-space benchmark on Linux would be. rdi = u32 array,
+ * rsi = samples, rdx = warm-up calls. Each sample: lfence; rdtsc; lfence;
+ * syscall getpid; rdtscp; lfence (Intel's timing pattern), cycles stored
+ * as u32. Then exit(0). rbx, r12-r15 survive the system call (ktest 900).
+ */
+	.global ublob_bench_getpid, ublob_bench_getpid_end
+ublob_bench_getpid:
+	movq %rdi, %r12
+	movq %rsi, %r13
+	movq %rdx, %r14
+1:	testq %r14, %r14
+	jz 2f
+	movl $SYS_getpid, %eax
+	syscall
+	decq %r14
+	jmp 1b
+2:	xorl %r15d, %r15d
+3:	cmpq %r13, %r15
+	jae 4f
+	lfence
+	rdtsc
+	lfence
+	shlq $32, %rdx
+	orq %rax, %rdx
+	movq %rdx, %rbx
+	movl $SYS_getpid, %eax
+	syscall
+	rdtscp
+	lfence
+	shlq $32, %rdx
+	orq %rax, %rdx
+	subq %rbx, %rdx
+	movl %edx, (%r12,%r15,4)
+	incq %r15
+	jmp 3b
+4:	movl $SYS_exit, %eax
+	xorl %edi, %edi
+	syscall
+	ud2
+ublob_bench_getpid_end:

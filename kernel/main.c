@@ -4,6 +4,7 @@
  * main.c - kmain: banner, SYSINIT hooks in link-time order, then either
  * the in-kernel test run (cmdline "ktest") or the magia> debug monitor.
  */
+#include <magia/bench.h>
 #include <magia/boot.h>
 #include <magia/cpu.h>
 #include <magia/ktest.h>
@@ -93,6 +94,8 @@ void kmain(void)
 	crash_tests();
 	if (ktest_exit_mode) {
 		int failed = ktest_run_all();
+		if (!failed && cmdline_has("bench") && bench_run(2000) != 0)
+			failed = 1; /* tests/run-ktest.sh's KVM run: numbers for the paper */
 		qemu_exit(failed ? 1 : 0x10);
 		machine_halt(); /* QEMU exits asynchronously */
 	}

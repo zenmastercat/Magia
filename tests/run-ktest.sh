@@ -27,8 +27,10 @@
 #               largest size QEMU can allocate and says so).
 #   5. bios:    boot "ktest" through SeaBIOS (Limine BIOS stages).
 #   6. noapic:  boot "ktest noapic" (8259 PIC + LAPIC timer).
-#   7. kvm:     boot "ktest" with -accel kvm -cpu host when /dev/kvm is
-#               usable (x2APIC + TSC-deadline timer); skipped otherwise.
+#   7. kvm:     boot "ktest bench" with -accel kvm -cpu host,+invtsc when
+#               /dev/kvm is usable (x2APIC + TSC-deadline timer), then the
+#               benchmark harness; BENCH lines checked and kept in
+#               build/bench-kvm.txt; skipped otherwise.
 #   8. more ktest boots, in the background: "desktop" (the desktop USB
 #               shape, no i8042), "legacy" (noapic pittick: the PIT tick),
 #               "nopit" (nopit nohpet: a gated PIT, no HPET; the TSC
@@ -348,14 +350,59 @@ check_ktest "$log" $? "noapic"
 
 # ---------------------------------------------------------------- 7. KVM
 # Hardware virtualisation with the host CPU model: x2APIC and the
-# TSC-deadline timer (TCG offers x2APIC but no TSC deadline).
+# TSC-deadline timer (TCG offers x2APIC but no TSC deadline), and the
+# invariant TSC bit (+invtsc), which -cpu host leaves out. After the
+# ktests the kernel runs the benchmark harness ("bench"): every primitive
+# must report sane numbers; the BENCH lines go to build/bench-kvm.txt.
 if [ -r /dev/kvm ] && [ -w /dev/kvm ] && [ "${KVM:-1}" = 1 ]; then
 	log="$LOGDIR/ktest-kvm.log"
-	echo "== kvm: ktest with -accel kvm -cpu host"
-	QEMU_ACCEL=kvm QEMU_CPU=host qemu "ktest" </dev/null >"$log" 2>&1
+	echo "== kvm: ktest bench with -accel kvm -cpu host,+invtsc"
+	# one host core for the whole VM (the paper's fairness rule; on a
+	# hybrid CPU the first P-core, else what BENCH_CPU says)
+	pin=${BENCH_CPU:-}
+	[ -z "$pin" ] && [ -r /sys/devices/cpu_core/cpus ] && pin=$(sed 's/[-,].*//' /sys/devices/cpu_core/cpus)
+	if [ -n "$pin" ] && command -v taskset >/dev/null; then
+		echo "   pinned to host CPU $pin"
+		QEMU="taskset -c $pin ${QEMU:-qemu-system-x86_64}" QEMU_ACCEL=kvm QEMU_CPU=host,+invtsc qemu "ktest bench" </dev/null >"$log" 2>&1
+	else
+		echo "   not pinned to a host CPU (set BENCH_CPU): numbers may mix core types"
+		QEMU_ACCEL=kvm QEMU_CPU=host,+invtsc qemu "ktest bench" </dev/null >"$log" 2>&1
+	fi
 	st=$?
 	tr -d '\r' <"$log" | grep -E '^intr:' | sed 's/^/   /'
 	check_ktest "$log" $st "kvm"
+	# the last run only (ktest 921 runs the harness too, with 1000 samples)
+	tr -d '\r' <"$log" | awk '/^BENCH-INFO/ { buf = "" } /^BENCH/ { buf = buf $0 "\n" } END { printf "%s", buf }' \
+		>"$LOGDIR/bench-kvm.txt"
+	bfail=0
+	grep -q '^BENCH-INFO .*invariant_tsc=1 rdtscp=1 timer=tsc_deadline' "$LOGDIR/bench-kvm.txt" ||
+		{ echo "   BENCH-INFO missing or not invariant TSC / rdtscp / TSC deadline"; bfail=1; }
+	grep -qx 'BENCH-END' "$LOGDIR/bench-kvm.txt" || { echo "   no BENCH-END"; bfail=1; }
+	# name|largest sane median in ns (generous: a KVM guest, any host)
+	while IFS='|' read -r name max; do
+		line=$(grep "^BENCH name=$name " "$LOGDIR/bench-kvm.txt")
+		med=$(echo "$line" | sed -n 's/.* median_ns=\([0-9]*\)\.[0-9].*/\1/p')
+		p99=$(echo "$line" | sed -n 's/.* p99_cycles=\([0-9]*\) .*/\1/p')
+		mc=$(echo "$line" | sed -n 's/.* median_cycles=\([0-9]*\) .*/\1/p')
+		n=$(echo "$line" | sed -n 's/.* n=\([0-9]*\) .*/\1/p')
+		if [ -z "$med" ] || [ "${n:-0}" -lt 1000 ] || [ "$mc" -le 0 ] || [ "$p99" -lt "$mc" ] || [ "$med" -gt "$max" ]; then
+			echo "   $name: not sane: ${line:-missing}"
+			bfail=1
+		else
+			echo "   $name: median $med ns (n=$n)"
+		fi
+	done <<EOB
+tsc_overhead|1000
+null_syscall_ring3|20000
+null_syscall_kernel|20000
+ctx_switch|50000
+irq_to_thread|500000
+page_map|50000
+page_unmap|50000
+kmalloc_free_64|20000
+page_alloc_free|100000
+EOB
+	[ $bfail -eq 0 ] || { echo "FAIL: kvm bench (see $LOGDIR/bench-kvm.txt)"; fail=1; }
 else
 	echo "== kvm: skipped (no usable /dev/kvm)"
 fi

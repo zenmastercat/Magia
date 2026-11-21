@@ -10,7 +10,7 @@
 # SMBIOS type 11 OEM string starting with "limine:config:", which Limine
 # reads before looking for limine.conf on disk; one image serves every
 # test (the ESP is found by its FAT label, so BIOS boots work too).
-# Environment: QEMU, QEMU_ACCEL, QEMU_MEM, QEMU_SMP, QEMU_CPU, OVMF
+# Environment: QEMU (may carry a prefix such as "taskset -c 0 qemu-system-x86_64"), QEMU_ACCEL, QEMU_MEM, QEMU_SMP, QEMU_CPU, OVMF
 # (path to OVMF.fd, or "bios" for SeaBIOS), QEMU_USB (kbd: an xHCI
 # controller with a USB keyboard, the default; xhci: the controller only;
 # desktop: the target desktop's shape - no i8042, two xHCI controllers, a
@@ -53,7 +53,7 @@ trap 'rm -f "$cfg"' EXIT INT TERM
 } >"$cfg"
 noreboot=-no-reboot
 [ "$QEMU_NOREBOOT" = 0 ] && noreboot=
-"$QEMU" -machine "$machine" -cpu "$QEMU_CPU" -accel "$QEMU_ACCEL" -m "$QEMU_MEM" -smp "$QEMU_SMP" \
+$QEMU -machine "$machine" -cpu "$QEMU_CPU" -accel "$QEMU_ACCEL" -m "$QEMU_MEM" -smp "$QEMU_SMP" \
 	$fw $usb $noreboot \
 	-drive "file=$IMG,format=raw,snapshot=on" \
 	-smbios "type=11,path=$cfg" \

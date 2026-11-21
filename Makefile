@@ -6,7 +6,8 @@
 #   make image    build/magia.img: GPT disk, FAT32 ESP, Limine for UEFI and BIOS
 #   make run      boot the image in QEMU with OVMF, serial console on stdio
 #                 (CMDLINE="..." sets the kernel command line)
-#   make test     host cargo tests + headless QEMU runs through OVMF (tests/run-ktest.sh)
+#   make test     host cargo tests, host C tests (bench statistics) + headless QEMU
+#                 runs through OVMF (tests/run-ktest.sh)
 #   make check    alias for test
 
 CC      ?= gcc
@@ -56,7 +57,7 @@ ASM_SRCS := $(wildcard arch/x86_64/*.S)
 OBJS := $(patsubst %.c,$(BUILD)/%.o,$(C_SRCS)) $(patsubst %.S,$(BUILD)/%.o,$(ASM_SRCS))
 RUST_SRCS := $(shell find rust/src -name '*.rs') rust/Cargo.toml rust/.cargo/config.toml
 
-.PHONY: all image run test check cargo-test ktest limine clean lines
+.PHONY: all image run test check cargo-test host-test ktest limine clean lines
 
 all: $(BUILD)/magia.elf
 
@@ -155,10 +156,17 @@ run: $(IMG)
 cargo-test:
 	cd rust && $(CARGO) test --target x86_64-unknown-linux-gnu
 
+# kernel/bench_stats.c is plain C without kernel dependencies: its own
+# test program runs on the host.
+host-test:
+	@mkdir -p $(BUILD)
+	$(HOSTCC) -O2 -std=gnu11 -Wall -Wextra -Werror -Iinclude -DBENCH_STATS_TEST kernel/bench_stats.c -o $(BUILD)/bench_stats_test
+	$(BUILD)/bench_stats_test
+
 ktest: $(IMG)
 	$(QEMU_ENV) sh tests/run-ktest.sh $(IMG)
 
-test: cargo-test ktest
+test: cargo-test host-test ktest
 	@echo "make test: all tests passed"
 
 check: test
