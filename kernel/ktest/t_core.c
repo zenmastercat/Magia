@@ -218,3 +218,40 @@ KTEST(022, acpi_power_fields_q35)
 		KT_EQ(inw(0x604) & 1, 1);
 	KT_ASSERT(acpi.smi_cmd != 0 && acpi.acpi_enable != 0);
 }
+
+/* Review 2b L3: firmware-named power registers are range-checked before
+ * any write: I/O ports below 0x100 belong to system devices (PIC, DMA,
+ * PIT, 8042), except SMI_CMD's standard APM port 0xb2; memory registers
+ * must not be RAM, the kernel or the framebuffer; PCI configuration
+ * space is not written. A memory register crossing a page maps both. */
+KTEST(023, power_registers_are_range_checked)
+{
+	KT_ASSERT(power_reg_ok(ACPI_GAS_IO, 0xcf9, 1, PREG_RESET));
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_IO, 0x64, 1, PREG_RESET));   /* the 8042: system device */
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_IO, 0x20, 1, PREG_RESET));   /* the PIC */
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_IO, 0xb2, 1, PREG_RESET));
+	KT_ASSERT(power_reg_ok(ACPI_GAS_IO, 0xb2, 1, PREG_SMI));      /* APM_CNT, every Intel PC */
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_IO, 0x20, 1, PREG_SMI));
+	KT_ASSERT(power_reg_ok(ACPI_GAS_IO, 0x604, 2, PREG_PM1));
+	KT_ASSERT(power_reg_ok(ACPI_GAS_IO, 0xfffe, 2, PREG_PM1));
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_IO, 0xffff, 2, PREG_PM1));   /* runs past the I/O space */
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_IO, 0x10000, 1, PREG_PM1));
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_PCI_CONFIG, 0xcf9, 1, PREG_RESET));
+	KT_ASSERT(!power_reg_ok(7, 0xcf9, 1, PREG_RESET));
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_MEMORY, kernel_phys_base, 1, PREG_RESET));
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_MEMORY, bootinfo.fb.pa + 4096, 2, PREG_PM1));
+	void *page = page_alloc(0);
+	KT_ASSERT(page && !power_reg_ok(ACPI_GAS_MEMORY, virt_to_phys(page) + 8, 2, PREG_PM1));
+	page_free(page, 0);
+	KT_ASSERT(!power_reg_ok(ACPI_GAS_MEMORY, ~0ULL, 2, PREG_PM1)); /* wraps */
+	KT_ASSERT(power_reg_ok(ACPI_GAS_MEMORY, 0xfed00fff, 2, PREG_PM1)); /* device memory */
+	/* a 16-bit access at the last byte of a page needs the next page too */
+	volatile uint8_t *p = power_mmio(0xfed00fff, 2);
+	KT_ASSERT(p != NULL);
+	uint64_t pa = 0, fl = 0;
+	KT_ASSERT(vmm_translate(dmap_base + 0xfed01000, &pa, &fl) && pa == 0xfed01000);
+	/* the boot values pass, so reboot and poweroff still work on q35 */
+	KT_ASSERT(power_reg_ok(acpi.reset_space, acpi.reset_addr, 1, PREG_RESET));
+	KT_ASSERT(power_reg_ok(acpi.pm1a_space, acpi.pm1a_cnt, 2, PREG_PM1));
+	KT_ASSERT(power_reg_ok(ACPI_GAS_IO, acpi.smi_cmd, 1, PREG_SMI));
+}

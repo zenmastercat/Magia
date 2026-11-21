@@ -32,22 +32,47 @@
 
 static const char *space_name(uint8_t s) { return s == ACPI_GAS_IO ? "I/O" : s == ACPI_GAS_MEMORY ? "memory" : "PCI"; }
 
-static volatile uint8_t *mmio(uint64_t pa) { return vmm_map_mmio(pa & ~(PAGE_SIZE - 1), PAGE_SIZE) ? (volatile uint8_t *)phys_to_virt(pa) : NULL; }
+/* Map [pa, pa + len) uncached: every page it touches (a 16-bit register
+ * at a page's last byte needs the next page too); vmm_map_mmio refuses
+ * RAM, the kernel and the framebuffer. */
+volatile uint8_t *power_mmio(uint64_t pa, unsigned len) { return vmm_map_mmio(pa, len); }
+
+/* Review 2b L3: a firmware-named register is written only if it is
+ * plausible: I/O ports 0x100..0xffff (below 0x100 are system devices -
+ * PIC, DMA, PIT, 8042 - except SMI_CMD's standard APM port 0xb2), or
+ * device memory (not RAM, kernel or framebuffer by the Limine map); never
+ * PCI configuration space. */
+bool power_reg_ok(uint8_t space, uint64_t addr, unsigned len, enum preg kind)
+{
+	uint64_t end;
+	if (len == 0 || __builtin_add_overflow(addr, (uint64_t)len, &end))
+		return false;
+	if (space == ACPI_GAS_IO)
+		return end <= 0x10000 && (addr >= 0x100 || (kind == PREG_SMI && addr == 0xb2));
+	if (space == ACPI_GAS_MEMORY)
+		return power_mmio(addr, len) != NULL;
+	return false;
+}
 
 static bool reg_read16(uint8_t space, uint64_t addr, uint16_t *v)
 {
+	if (!power_reg_ok(space, addr, 2, PREG_PM1))
+		return false;
 	if (space == ACPI_GAS_IO) {
 		*v = inw((uint16_t)addr);
 		return true;
 	}
-	volatile uint8_t *p = space == ACPI_GAS_MEMORY ? mmio(addr) : NULL;
-	if (p)
-		*v = *(volatile uint16_t *)p;
-	return p != NULL;
+	*v = *(volatile uint16_t *)power_mmio(addr, 2);
+	return true;
 }
 
-static bool reg_write(uint8_t space, uint64_t addr, uint16_t v, bool wide)
+static bool reg_write(uint8_t space, uint64_t addr, uint16_t v, bool wide, enum preg kind)
 {
+	if (!power_reg_ok(space, addr, wide ? 2 : 1, kind)) {
+		kprintf("power: refusing to write %s 0x%lx (not a plausible register)\n", space == ACPI_GAS_IO ? "I/O" :
+			space == ACPI_GAS_MEMORY ? "memory" : "PCI", addr);
+		return false;
+	}
 	if (space == ACPI_GAS_IO) {
 		if (wide)
 			outw((uint16_t)addr, v);
@@ -55,7 +80,7 @@ static bool reg_write(uint8_t space, uint64_t addr, uint16_t v, bool wide)
 			outb((uint16_t)addr, (uint8_t)v);
 		return true;
 	}
-	volatile uint8_t *p = space == ACPI_GAS_MEMORY ? mmio(addr) : NULL;
+	volatile uint8_t *p = power_mmio(addr, wide ? 2 : 1);
 	if (!p)
 		return false;
 	if (wide)
@@ -68,10 +93,10 @@ static bool reg_write(uint8_t space, uint64_t addr, uint16_t v, bool wide)
 void acpi_reboot(void)
 {
 	cli();
-	if (acpi.reset_ok && acpi.reset_space != ACPI_GAS_PCI_CONFIG) {
+	if (acpi.reset_ok && power_reg_ok(acpi.reset_space, acpi.reset_addr, 1, PREG_RESET)) {
 		kprintf("reboot: ACPI reset register (%s 0x%lx = 0x%02x)\n", space_name(acpi.reset_space), acpi.reset_addr,
 			acpi.reset_value);
-		reg_write(acpi.reset_space, acpi.reset_addr, acpi.reset_value, false);
+		reg_write(acpi.reset_space, acpi.reset_addr, acpi.reset_value, false, PREG_RESET);
 		delay_ms(500);
 		kprintf("reboot: the reset register did not reset; trying the 8042 and a triple fault\n");
 	} else {
@@ -85,9 +110,12 @@ void acpi_reboot(void)
 static void acpi_mode_on(void)
 {
 	uint16_t v;
-	if (!reg_read16(acpi.pm1a_space, acpi.pm1a_cnt, &v) || (v & PM1_SCI_EN) || !acpi.smi_cmd || !acpi.acpi_enable ||
-	    acpi.smi_cmd > 0xffff)
+	if (!reg_read16(acpi.pm1a_space, acpi.pm1a_cnt, &v) || (v & PM1_SCI_EN) || !acpi.smi_cmd || !acpi.acpi_enable)
 		return;
+	if (!power_reg_ok(ACPI_GAS_IO, acpi.smi_cmd, 1, PREG_SMI)) {
+		kprintf("poweroff: SMI_CMD 0x%x is not a plausible port; not switching to ACPI mode\n", acpi.smi_cmd);
+		return;
+	}
 	kprintf("poweroff: firmware in legacy mode, enabling ACPI through SMI_CMD 0x%x\n", acpi.smi_cmd);
 	outb((uint16_t)acpi.smi_cmd, acpi.acpi_enable);
 	for (int i = 0; i < 300; i++) {
@@ -108,7 +136,7 @@ void acpi_poweroff(void)
 	if (acpi.hw_reduced && acpi.sleep_ctl) {
 		kprintf("poweroff: ACPI S5 (hardware-reduced: SLP_TYP %u into the sleep control register)\n", acpi.slp_typa);
 		cli();
-		reg_write(acpi.sleep_ctl_space, acpi.sleep_ctl, SLEEP_CTL_TYP(acpi.slp_typa) | SLEEP_CTL_EN, false);
+		reg_write(acpi.sleep_ctl_space, acpi.sleep_ctl, SLEEP_CTL_TYP(acpi.slp_typa) | SLEEP_CTL_EN, false, PREG_PM1);
 	} else if (acpi.pm1a_cnt) {
 		acpi_mode_on();
 		kprintf("poweroff: ACPI S5 (SLP_TYPa %u into PM1a control %s 0x%lx", acpi.slp_typa,
@@ -124,12 +152,12 @@ void acpi_poweroff(void)
 		/* sleep type first, then SLP_EN (ACPI 6.5 16.1.7) */
 		a = (uint16_t)((a & ~(PM1_SLP_TYP_MASK | PM1_SLP_EN)) | PM1_SLP_TYP(acpi.slp_typa));
 		b = (uint16_t)((b & ~(PM1_SLP_TYP_MASK | PM1_SLP_EN)) | PM1_SLP_TYP(acpi.slp_typb));
-		reg_write(acpi.pm1a_space, acpi.pm1a_cnt, a, true);
+		reg_write(acpi.pm1a_space, acpi.pm1a_cnt, a, true, PREG_PM1);
 		if (acpi.pm1b_cnt)
-			reg_write(acpi.pm1b_space, acpi.pm1b_cnt, b, true);
-		reg_write(acpi.pm1a_space, acpi.pm1a_cnt, a | PM1_SLP_EN, true);
+			reg_write(acpi.pm1b_space, acpi.pm1b_cnt, b, true, PREG_PM1);
+		reg_write(acpi.pm1a_space, acpi.pm1a_cnt, a | PM1_SLP_EN, true, PREG_PM1);
 		if (acpi.pm1b_cnt)
-			reg_write(acpi.pm1b_space, acpi.pm1b_cnt, b | PM1_SLP_EN, true);
+			reg_write(acpi.pm1b_space, acpi.pm1b_cnt, b | PM1_SLP_EN, true, PREG_PM1);
 	} else {
 		kprintf("poweroff: the FADT has no PM1a control block; halting - switch the machine off by hand\n");
 		machine_halt();
@@ -143,8 +171,10 @@ void acpi_power_dump(void)
 {
 	kprintf("power: reset %s", acpi.reset_ok ? space_name(acpi.reset_space) : "none (8042/triple fault)");
 	if (acpi.reset_ok)
-		kprintf(" 0x%lx=0x%02x", acpi.reset_addr, acpi.reset_value);
-	kprintf(", PM1a %s 0x%lx", space_name(acpi.pm1a_space), acpi.pm1a_cnt);
+		kprintf(" 0x%lx=0x%02x%s", acpi.reset_addr, acpi.reset_value,
+			power_reg_ok(acpi.reset_space, acpi.reset_addr, 1, PREG_RESET) ? "" : " (refused)");
+	kprintf(", PM1a %s 0x%lx%s", space_name(acpi.pm1a_space), acpi.pm1a_cnt,
+		!acpi.pm1a_cnt || power_reg_ok(acpi.pm1a_space, acpi.pm1a_cnt, 2, PREG_PM1) ? "" : " (refused)");
 	if (acpi.pm1b_cnt)
 		kprintf(", PM1b 0x%lx", acpi.pm1b_cnt);
 	if (acpi.s5_found)

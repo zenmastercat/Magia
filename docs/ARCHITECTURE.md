@@ -156,7 +156,12 @@ memory), then falls back to the 8042 reset pulse and a triple fault;
 `poweroff` switches legacy-mode firmware to ACPI mode through SMI_CMD
 (bounded wait for SCI_EN), then writes SLP_TYPa/b and SLP_EN into PM1a
 (and PM1b) control, or the sleep control register on hardware-reduced
-ACPI, each step logged.
+ACPI, each step logged. Every register is range-checked before it is
+touched (`power_reg_ok`): I/O ports 0x100..0xffff (SMI_CMD may also be
+the standard APM port 0xb2), or device memory that is not RAM, the
+kernel or the framebuffer, mapped across every page the access touches;
+PCI configuration space is not written. A refused reset register falls
+back to the 8042.
 
 ## PCI and USB (stage 2)
 

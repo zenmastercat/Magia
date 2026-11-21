@@ -78,6 +78,9 @@ extern struct acpi_info acpi;
 __noreturn void acpi_reboot(void);
 __noreturn void acpi_poweroff(void);
 void acpi_power_dump(void); /* one line for hwinfo */
+enum preg { PREG_RESET, PREG_PM1, PREG_SMI };
+bool power_reg_ok(uint8_t space, uint64_t addr, unsigned len, enum preg kind); /* plausible register? */
+volatile uint8_t *power_mmio(uint64_t pa, unsigned len); /* every page of the range, or NULL */
 extern int acpi_status; /* 0, or -code from rs_acpi_parse (no ACPI: -100) */
 
 /* Rust: parse the tables reachable from the RSDP into *out (0 or -code);
