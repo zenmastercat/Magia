@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 zenmastercat and Magia contributors */
 /* t_usb.c - ktests for the xHCI driver and the USB boot keyboard (07x). */
+#include <magia/abi.h>
 #include <magia/apic.h>
 #include <magia/ktest.h>
 #include <magia/pci.h>
@@ -21,7 +22,7 @@ KTEST(070, xhci_controller_runs_with_msix)
 	KT_ASSERT(xhci.cmd_events >= 3); /* enable slot, address device, configure endpoint */
 	KT_EQ(xhci.bad_events, 0);
 	uint64_t irqs = xhci.irqs, cmds = xhci.cmd_events, vec = vec_counts[xhci.vector];
-	KT_EQ(xhci_noop(), 0);
+	KT_EQ(xhci_noop(1), 0);
 	for (int i = 0; i < 200 && xhci.cmd_events == cmds; i++)
 		thread_sleep_ms(1);
 	KT_EQ(xhci.cmd_events, cmds + 1);
@@ -38,7 +39,7 @@ KTEST(073, xhci_command_ring_wraps)
 	int done = 0;
 	for (int i = 0; i < 300; i++) {
 		uint64_t cmds = xhci.cmd_events;
-		if (xhci_noop() != 0)
+		if (xhci_noop(1) != 0)
 			break;
 		for (int t = 0; t < 200 && xhci.cmd_events == cmds; t++)
 			thread_sleep_ms(1);
@@ -78,4 +79,23 @@ KTEST(072, usb_parsers_reject_garbage)
 	KT_EQ(rs_usb_config_total(bad_cfg, sizeof(bad_cfg)), 200);
 	uint8_t out[4];
 	KT_EQ(rs_usb_kbd_report(bad_cfg, 2, out, sizeof(out)), 0); /* too short */
+}
+
+/* Review F4: one interrupt handles at most 32 events. 40 No Op commands
+ * behind one doorbell complete at once; the handler leaves 8, and the
+ * controller interrupts again because the ring is not empty when the
+ * handler clears EHB. All 40 arrive, over at least two interrupts. */
+KTEST(074, xhci_irq_handles_a_bounded_batch)
+{
+	KT_ASSERT(xhci.running && xhci.vector);
+	uint64_t irqs = xhci.irqs, cmds = xhci.cmd_events;
+	KT_EQ(xhci_noop(40), 0);
+	for (int t = 0; t < 500 && xhci.cmd_events < cmds + 40; t++)
+		thread_sleep_ms(1);
+	KT_EQ(xhci.cmd_events, cmds + 40);
+	KT_ASSERT(xhci.irqs >= irqs + 2);
+	KT_ASSERT(xhci.irq_max_events >= 1 && xhci.irq_max_events <= 32);
+	KT_EQ(xhci.bad_events, 0);
+	KT_EQ(xhci_noop(0), -EINVAL);
+	KT_EQ(xhci_noop(65), -EINVAL);
 }

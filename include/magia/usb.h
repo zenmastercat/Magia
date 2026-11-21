@@ -37,6 +37,7 @@ struct xhci_stats {
 	bool msix;               /* interrupts by MSI-X (else MSI, else polling) */
 	int vector;
 	uint64_t events, cmd_events, xfer_events, port_events, irqs, bad_events;
+	unsigned irq_max_events; /* most events one interrupt handled */
 	/* the keyboard, if one was found */
 	bool kbd;
 	uint8_t kbd_port, kbd_slot, kbd_speed, kbd_dci;
@@ -47,6 +48,6 @@ struct xhci_stats {
 };
 extern struct xhci_stats xhci;
 void xhci_dump(void); /* monitor "usb" */
-int xhci_noop(void);   /* ktest: a No Op command completed by interrupt */
+int xhci_noop(unsigned n); /* ktest: n No Op commands (1..64) completed by interrupt */
 
 #endif

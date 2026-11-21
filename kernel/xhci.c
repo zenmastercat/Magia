@@ -81,6 +81,7 @@
 #define NTRB 256 /* one 4 KiB page per ring */
 #define MAX_SLOTS 32
 #define REPORT_BUF 64
+#define IRQ_BATCH 32 /* events handled per interrupt */
 
 struct ring {
 	volatile struct xhci_trb *trbs;
@@ -213,9 +214,10 @@ static bool next_event(struct evt *e)
 	return true;
 }
 
-/* Wait for the event of a command or control transfer; other events
- * (port changes, keyboard reports) are handled on the way. */
-static bool wait_event(uint32_t type, uint64_t trb_pa, struct evt *out, uint64_t ms)
+/* Wait for the event of a command or control transfer (on `slot`'s EP0;
+ * slot 0 for commands); other events (port changes, keyboard reports) are
+ * handled on the way. */
+static bool wait_event(uint32_t type, unsigned slot, uint64_t trb_pa, struct evt *out, uint64_t ms)
 {
 	uint64_t end = now_ns() + ms * 1000000ULL;
 	while (now_ns() < end) {
@@ -230,7 +232,7 @@ static bool wait_event(uint32_t type, uint64_t trb_pa, struct evt *out, uint64_t
 			xhci.port_events++;
 		else if (e.type == XHCI_EVT_XFER)
 			xhci.xfer_events++;
-		bool ep0_error = type == XHCI_EVT_XFER && e.type == XHCI_EVT_XFER && e.ep == 1 &&
+		bool ep0_error = type == XHCI_EVT_XFER && e.type == XHCI_EVT_XFER && e.slot == slot && e.ep == 1 &&
 				 e.code != XHCI_CODE_SUCCESS && e.code != XHCI_CODE_SHORT_XFER;
 		if ((e.type == type && e.ptr == trb_pa) || ep0_error) {
 			*out = e;
@@ -247,7 +249,7 @@ static int command(uint64_t ptr, uint32_t status, uint32_t flags, struct evt *re
 	uint64_t pa = ring_produce(&cmd_ring, ptr, status, flags);
 	doorbell(0, 0);
 	struct evt e;
-	if (!wait_event(XHCI_EVT_CMD_COMPLETE, pa, &e, 1000))
+	if (!wait_event(XHCI_EVT_CMD_COMPLETE, 0, pa, &e, 1000))
 		return -ETIMEDOUT;
 	if (res)
 		*res = e;
@@ -274,7 +276,7 @@ static int control(struct ring *ep0_ring, unsigned slot, uint8_t reqtype, uint8_
 	struct evt e;
 	/* success is reported on the status TRB; an error on whichever stage
 	 * failed, so any error event for this slot's EP0 ends the transfer */
-	if (!wait_event(XHCI_EVT_XFER, st, &e, 1000))
+	if (!wait_event(XHCI_EVT_XFER, slot, st, &e, 1000))
 		return -ETIMEDOUT;
 	return e.code == XHCI_CODE_SUCCESS ? 0 : -EIO;
 }
@@ -331,8 +333,14 @@ static void xhci_irq(struct trapframe *tf)
 	xhci.irqs++;
 	rwrite32(XHCI_IMAN(0), rread32(XHCI_IMAN(0)) | XHCI_IMAN_INTR_PEND); /* RW1C */
 	owrite32(XHCI_USBSTS, XHCI_STS_EINT);
+	/* At most IRQ_BATCH events, so a device flooding the ring cannot keep
+	 * the CPU here. next_event has already moved ERDP past each event and
+	 * cleared EHB; with events left, the controller interrupts again (the
+	 * poll thread, if used, comes back in 8 ms). */
 	struct evt e;
-	while (next_event(&e)) {
+	unsigned n = 0;
+	while (n < IRQ_BATCH && next_event(&e)) {
+		n++;
 		if (e.type == XHCI_EVT_XFER) {
 			xhci.xfer_events++;
 			handle_xfer(&e);
@@ -342,6 +350,7 @@ static void xhci_irq(struct trapframe *tf)
 			xhci.cmd_events++;
 		}
 	}
+	xhci.irq_max_events = MAX(xhci.irq_max_events, n);
 }
 
 static void poll_thread(void *arg)
@@ -615,14 +624,18 @@ static void xhci_init(void)
 	kprintf("\n");
 }
 
-/* For ktest: queue a No Op command; its completion event arrives by
- * interrupt (the handler counts it), proving MSI/MSI-X delivery. */
-int xhci_noop(void)
+/* For ktest: queue n No Op commands behind one doorbell; their completion
+ * events arrive by interrupt (the handler counts them), proving MSI/MSI-X
+ * delivery. */
+int xhci_noop(unsigned n)
 {
 	if (!xhci.running || !xhci.vector)
 		return -ENOENT;
+	if (n == 0 || n > 64)
+		return -EINVAL; /* well inside one ring lap and the event ring */
 	uint64_t f = irq_save();
-	ring_produce(&cmd_ring, 0, 0, XHCI_CMD_NOOP);
+	for (unsigned i = 0; i < n; i++)
+		ring_produce(&cmd_ring, 0, 0, XHCI_CMD_NOOP);
 	doorbell(0, 0);
 	irq_restore(f);
 	return 0;
