@@ -145,7 +145,9 @@ ECAM, MADT for SMP).
 
 - **pci.c**: configuration space through ECAM (base and bus range from
   MCFG, segment 0); each bus's 1 MiB window is mapped uncached when first
-  scanned; bus 0 is scanned and bridges are followed to their secondary
+  scanned, after checking that it lies inside the MCFG range (aligned, no
+  wrap, below 2^52) and, through `vmm_map_mmio()`, that it is not RAM or
+  the framebuffer (the same check covers BARs and MSI-X tables); bus 0 is scanned and bridges are followed to their secondary
   buses (each bus once, depth bounded). Config accesses are bounded to the
   function's 4 KiB. BARs are sized with decoding (and interrupts) off.
   Capability lists are walked with the spec's limits (dword-aligned
@@ -218,8 +220,9 @@ entropy (once), RDSEED, RDRAND, TSC jitter. API: `arc4random_buf`,
   both writable and executable; boot stops if the CPU has no NX.
   `vmm_map_mmio()` maps device registers uncached at `dmap_base + pa` and
   refuses any range that overlaps RAM in the memory map (usable, kernel,
-  bootloader-reclaimable), so a firmware table that names RAM as an I/O
-  APIC or HPET cannot turn register writes into kernel-memory writes; that
+  bootloader-reclaimable) or the framebuffer, so a firmware table or BAR
+  that names RAM as an I/O APIC, HPET, ECAM window or device register
+  block cannot turn register writes into kernel-memory writes; that
   device is skipped.
 - **Immutable kernel image** (OpenBSD `mimmutable` idea): the last boot
   step locks the kernel. Exactly what is locked:

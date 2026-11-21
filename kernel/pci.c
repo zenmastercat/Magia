@@ -33,12 +33,24 @@ static uint8_t bus_lo, bus_hi;
 static volatile uint8_t *bus_va[256];
 static uint64_t visited[4]; /* one bit per bus */
 
+/* MCFG is firmware input: the window must be 1 MiB aligned, its bus inside
+ * [lo, hi], and the whole range must neither wrap nor pass the 52-bit
+ * physical address limit. */
+uint64_t pci_ecam_window(uint64_t base, uint8_t lo, uint8_t hi, unsigned bus)
+{
+	uint64_t end = base + (((uint64_t)hi + 1) << 20);
+	if ((base & ((1 << 20) - 1)) || lo > hi || bus < lo || bus > hi || end < base || end > (1ULL << 52))
+		return 0;
+	return base + ((uint64_t)bus << 20);
+}
+
 static volatile uint8_t *bus_window(uint8_t bus)
 {
-	if (bus < bus_lo || bus > bus_hi)
+	uint64_t pa = pci_ecam_window(ecam_base, bus_lo, bus_hi, bus);
+	if (!pa)
 		return NULL;
 	if (!bus_va[bus])
-		bus_va[bus] = vmm_map_mmio(ecam_base + ((uint64_t)bus << 20), 1 << 20);
+		bus_va[bus] = vmm_map_mmio(pa, 1 << 20); /* refuses RAM and the framebuffer */
 	return bus_va[bus];
 }
 

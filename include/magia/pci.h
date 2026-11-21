@@ -62,6 +62,9 @@ void pci_write32(const struct pci_dev *d, uint32_t off, uint32_t v);
 struct pci_dev *pci_find_class(uint8_t class, uint8_t subclass, uint8_t prog_if, int index);
 const char *pci_class_name(uint8_t class, uint8_t subclass);
 void pci_dump(void); /* lspci */
+/* Physical address of `bus`'s 1 MiB ECAM window in the MCFG range
+ * (base, start bus lo, end bus hi), or 0 if it is not a sane window. */
+uint64_t pci_ecam_window(uint64_t base, uint8_t lo, uint8_t hi, unsigned bus);
 
 /* BARs and capabilities */
 void pci_read_bars(struct pci_dev *d);

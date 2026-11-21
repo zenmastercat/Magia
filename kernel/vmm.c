@@ -283,17 +283,20 @@ void vmm_init(void)
 		nx_enabled ? "on" : "off", vmm_dmap_bytes >> 20, vmm_pt_pages);
 }
 
-/* Device registers named by firmware (ACPI, MSRs) must not be RAM: a bad
- * table would otherwise turn MMIO writes into writes to kernel memory. */
+/* Device registers named by firmware (ACPI, MCFG, BARs, MSRs) must not be
+ * RAM or the framebuffer: a bad table would otherwise turn MMIO writes into
+ * writes to kernel memory or the console. */
 static bool overlaps_ram(uint64_t s, uint64_t e)
 {
 	for (size_t i = 0; i < bootinfo.nmmap; i++) {
 		const struct boot_mmap_entry *m = &bootinfo.mmap[i];
-		bool ram = m->type == MEM_USABLE || m->type == MEM_KERNEL || m->type == MEM_BOOT_RECLAIM;
+		bool ram = m->type == MEM_USABLE || m->type == MEM_KERNEL || m->type == MEM_BOOT_RECLAIM ||
+			   m->type == MEM_FRAMEBUFFER;
 		if (ram && s < m->base + m->length && m->base < e)
 			return true;
 	}
-	return false;
+	uint64_t fb = bootinfo.fb.pa, fbe = fb + bootinfo.fb.pitch * bootinfo.fb.height;
+	return fb && s < fbe && fb < e; /* also when the memory map does not list it */
 }
 
 void *vmm_map_mmio(uint64_t pa, uint64_t len)

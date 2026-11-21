@@ -3,6 +3,7 @@
 /* t_pci.c - ktests for PCI/PCIe enumeration, BARs and MSI-X (06x). */
 #include <magia/ktest.h>
 #include <magia/apic.h>
+#include <magia/boot.h>
 #include <magia/mm.h>
 #include <magia/pci.h>
 
@@ -159,4 +160,30 @@ KTEST(064, pci_bus_master_off_on_undriven_functions)
 	KT_ASSERT(checked >= 3); /* q35: host bridge, LPC, SATA, SMBus, NIC */
 	KT_EQ(on, 0);
 	KT_ASSERT(x && (pci_read16(x, PCI_COMMAND) & PCI_CMD_MASTER)); /* the driven xHCI */
+}
+
+/* Review F8: firmware's ECAM and BAR addresses are checked before they are
+ * mapped. Each bus's 1 MiB ECAM window must lie inside the MCFG range
+ * (base + start_bus MiB .. base + (end_bus + 1) MiB), without wrapping or
+ * passing the 52-bit physical limit; and vmm_map_mmio, which maps every
+ * ECAM window, BAR and MSI-X table, refuses RAM and the framebuffer. */
+KTEST(066, pci_ecam_and_mmio_ranges_are_checked)
+{
+	KT_EQ(pci_ecam_window(0xe0000000, 0, 255, 0), 0xe0000000);
+	KT_EQ(pci_ecam_window(0xe0000000, 0, 255, 255), 0xe0000000 + (255ULL << 20));
+	KT_EQ(pci_ecam_window(0xe0000000, 1, 3, 3), 0xe0000000 + (3ULL << 20));
+	KT_EQ(pci_ecam_window(0xe0000000, 1, 3, 0), 0);          /* below start_bus */
+	KT_EQ(pci_ecam_window(0xe0000000, 1, 3, 4), 0);          /* past end_bus */
+	KT_EQ(pci_ecam_window(0xe0000000, 3, 1, 2), 0);          /* empty range */
+	KT_EQ(pci_ecam_window(0xe0080000, 0, 0, 0), 0);          /* not 1 MiB aligned */
+	KT_EQ(pci_ecam_window(0xfffffffffff00000ULL, 0, 1, 0), 0); /* wraps */
+	KT_EQ(pci_ecam_window(1ULL << 52, 0, 0, 0), 0);          /* beyond physical addresses */
+	KT_EQ(pci_ecam_window((1ULL << 52) - (1 << 20), 0, 1, 0), 0); /* ends beyond them */
+	if (bootinfo.fb.pa) {
+		uint64_t fb = bootinfo.fb.pa, len = bootinfo.fb.pitch * bootinfo.fb.height;
+		KT_ASSERT(vmm_map_mmio(fb, PAGE_SIZE) == NULL);
+		KT_ASSERT(vmm_map_mmio(fb + len - 8, 16) == NULL);  /* the last bytes */
+		KT_ASSERT(vmm_map_mmio(fb - 8, 16) == NULL);        /* straddling the start */
+	}
+	KT_ASSERT(vmm_map_mmio(virt_to_phys(&pci_ndevs), 4) == NULL); /* the kernel image */
 }
