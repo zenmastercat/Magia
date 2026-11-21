@@ -70,6 +70,7 @@
  */
 #include <magia/abi.h>
 #include <magia/acpi.h>
+#include <magia/hwinfo.h>
 #include <magia/linker_set.h>
 #include <magia/mm.h>
 #include <magia/pci.h>
@@ -665,6 +666,17 @@ void xhci_dump(void)
 		kprintf("keyboard: %04x:%04x port %u slot %u ep 0x%02x, %lu reports, %lu chars, %lu errors\n",
 			xhci.kbd_dev.vendor, xhci.kbd_dev.product, xhci.kbd_port, xhci.kbd_slot, xhci.kbd_if.ep_addr,
 			xhci.kbd_reports, xhci.kbd_chars, xhci.kbd_errors);
+}
+
+void usb_hwinfo(void)
+{
+	if (!xhci.running)
+		return;
+	hwinfo_add("c0 %02x:%02x.%u %04x:%04x", pdev->bus, pdev->dev, pdev->fn, pdev->vendor, pdev->device);
+	static const char *const sp[] = { "?", "FS", "LS", "HS", "SS" };
+	if (xhci.kbd)
+		hwinfo_add("c0 p%u %04x:%04x %s kbd", xhci.kbd_port, xhci.kbd_dev.vendor, xhci.kbd_dev.product,
+			   sp[xhci.kbd_speed < 5 ? xhci.kbd_speed : 0]);
 }
 
 static void xhci_sysinit(void) { xhci_init(); }

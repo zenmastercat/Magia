@@ -94,7 +94,7 @@ rm -f "$sock"
 		i=$((i + 1))
 		[ $i -gt 600 ] && break
 	done
-	for cmd in "uname" "sysctl kern.ostype" "ls /dev" "cat /etc/motd" "jails" "ps" "lspci" "frobnicate"; do
+	for cmd in "uname" "sysctl kern.ostype" "ls /dev" "cat /etc/motd" "jails" "ps" "lspci" "hwinfo" "dmesg 400" "frobnicate"; do
 		printf '%s\r' "$cmd"
 		sleep 0.3
 	done
@@ -107,12 +107,14 @@ st=$?
 rm -f "$sock"
 clean=$(tr -d '\r' <"$log")
 mfail=0
-for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye"; do
+for want in "magia> uname" "Magia" "console" "1b36:000d class 0c/03/30" "hwinfo | " "1b36:000d 0c0330" "unknown command 'frobnicate'" "magia> echo kbd-OK" "poweroff: bye"; do
 	if ! printf '%s\n' "$clean" | grep -qF "$want"; then
 		echo "   missing in monitor output: $want"
 		mfail=1
 	fi
 done
+# dmesg repeats the boot log: the ECAM line appears twice
+[ "$(printf "%s\n" "$clean" | grep -c "^pci: ECAM")" -ge 2 ] || { echo "   dmesg did not print the boot log"; mfail=1; }
 # the echo command's own output line, not just the echoed keystrokes
 printf '%s\n' "$clean" | grep -qx 'kbd-OK' || { echo "   keyboard command did not run"; mfail=1; }
 [ "$st" -eq 33 ] || { echo "   QEMU exit status $st, expected 33"; mfail=1; }
@@ -120,7 +122,7 @@ if [ $mfail -ne 0 ]; then
 	echo "FAIL: monitor smoke test (see $log)"
 	fail=1
 else
-	echo "   monitor: 8 commands over serial, 1 over the PS/2 keyboard, poweroff exit status 33"
+	echo "   monitor: 10 commands over serial (hwinfo, dmesg), 1 over the PS/2 keyboard, poweroff exit status 33"
 fi
 
 # ---------------------------------------------------------------- 2b. USB keyboard

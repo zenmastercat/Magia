@@ -5,12 +5,15 @@
  *
  * Serial is the primary console (QEMU -nographic, the test harness and the
  * magia> monitor all use it); output is copied to the framebuffer console
- * (fbcon.c). Input comes from COM1 and the PS/2 keyboard (kbd.c).
+ * (fbcon.c) and kept in the kernel log ring (klog.c). Input comes from
+ * COM1, the PS/2 keyboard (kbd.c) and USB keyboards (xhci.c).
  * Input arrives on IRQ4 into a small ring buffer; console_getc_wait()
  * sleeps until a byte is available.
  */
 #include <magia/fbcon.h>
+#include <magia/kbd.h>
 #include <magia/kernel.h>
+#include <magia/klog.h>
 #include <magia/linker_set.h>
 #include <magia/spinlock.h>
 #include <magia/thread.h>
@@ -52,19 +55,73 @@ void console_init(void)
 	fbcon_init();
 }
 
-void console_write(const char *s, size_t n)
+static void emit(const char *s, size_t n, bool log)
 {
-	if (panicking) {
+	if (panicking) { /* the lock may be held by the code that panicked */
+		if (log)
+			klog_put(&kernel_log, s, n);
 		for (size_t i = 0; i < n; i++)
 			putc_locked(s[i]);
 		fbcon_flush();
 		return;
 	}
 	spin_lock(&con_lock);
+	if (log)
+		klog_put(&kernel_log, s, n);
 	for (size_t i = 0; i < n; i++)
 		putc_locked(s[i]);
 	fbcon_flush();
 	spin_unlock(&con_lock);
+}
+
+void console_write(const char *s, size_t n) { emit(s, n, true); }
+
+/* dmesg: print log bytes without logging them a second time. */
+void console_write_nolog(const char *s, size_t n) { emit(s, n, false); }
+
+/* Run fn with the console lock held (it protects the framebuffer
+ * console's state), e.g. to scroll or to draw the panic screen. */
+void console_locked(void (*fn)(void *), void *arg)
+{
+	if (panicking) {
+		fn(arg);
+		return;
+	}
+	spin_lock(&con_lock);
+	fn(arg);
+	spin_unlock(&con_lock);
+}
+
+/* VT220 keys from every input source (serial terminals, and the PS/2 and
+ * USB keyboards, which send the same sequences): ESC [ n ~ with n = 5
+ * (Page Up) or 6 (Page Down) become VT_PGUP / VT_PGDN; other escape
+ * sequences are swallowed; everything else passes through. */
+int vt_decode(struct vt_dec *d, int c)
+{
+	switch (d->state) {
+	case 0:
+		if (c == 0x1b) {
+			d->state = 1;
+			return -1;
+		}
+		return c;
+	case 1:
+		d->state = c == '[' ? 2 : 0;
+		d->num = 0;
+		return -1;
+	default:
+		if (c >= '0' && c <= '9') {
+			if (d->num < 1000)
+				d->num = d->num * 10 + (c - '0');
+			return -1;
+		}
+		d->state = 0;
+		if (c == '~' && d->num == 5)
+			return VT_PGUP;
+		if (c == '~' && d->num == 6)
+			return VT_PGDN;
+		return -1; /* arrows (ESC [ A) and the rest: not used yet */
+	}
 }
 
 void console_putc(char c) { console_write(&c, 1); }

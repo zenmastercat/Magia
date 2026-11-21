@@ -73,8 +73,12 @@ static void kbd_irq(struct trapframe *tf)
 			continue; /* mouse byte */
 		kbd_bytes++;
 		int c = kbd_translate(&kst, sc);
-		if (c >= 0)
+		if (c == KBD_PGUP || c == KBD_PGDN) {
+			for (const char *s = c == KBD_PGUP ? VT_SEQ_PGUP : VT_SEQ_PGDN; *s; s++)
+				console_rx_push((uint8_t)*s);
+		} else if (c >= 0) {
 			console_rx_push((uint8_t)c);
+		}
 	}
 }
 

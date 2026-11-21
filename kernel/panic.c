@@ -7,6 +7,7 @@
  * -fno-omit-frame-pointer / force-frame-pointers) and look addresses up in
  * the sorted symbol table that the second link pass embeds in .ksyms.
  */
+#include <magia/fbcon.h>
 #include <magia/kernel.h>
 #include <magia/x86.h>
 
@@ -91,13 +92,15 @@ void panic(const char *fmt, ...)
 		for (;;)
 			hlt();
 	}
+	static char msg[160];
 	va_list ap;
 	va_start(ap, fmt);
-	kprintf("\n*** Magia panic: ");
-	kvprintf(fmt, ap);
-	kprintf(" ***\n");
+	kvsnprintf(msg, sizeof(msg), fmt, ap);
 	va_end(ap);
+	kprintf("\n*** Magia panic: %s ***\n", msg);
 	backtrace_from(read_rbp(), 0);
+	/* no serial port on the target machines: the screen is the report */
+	fbcon_panic_screen(msg);
 	if (ktest_exit_mode) {
 		kprintf("KTEST PANIC\n");
 		qemu_exit(3);

@@ -85,6 +85,10 @@ int kbd_translate(struct kbd_state *st, uint8_t sc)
             case 0xb8: /* Right Alt Break */
                 st->alt = false;
                 return -1;
+            case 0x49: /* Page Up make: scrolls the screen back */
+                return KBD_PGUP;
+            case 0x51: /* Page Down make */
+                return KBD_PGDN;
             default:
                 /* Arrows and other extended codes return -1 */
                 return -1;

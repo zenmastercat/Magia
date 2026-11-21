@@ -9,6 +9,10 @@
  * sysctl, files).
  */
 #include <magia/cpu.h>
+#include <magia/fbcon.h>
+#include <magia/hwinfo.h>
+#include <magia/kbd.h>
+#include <magia/klog.h>
 #include <magia/ktest.h>
 #include <magia/mm.h>
 #include <magia/pci.h>
@@ -87,6 +91,18 @@ static void cmd_poweroff(int argc, char **argv)
 static void cmd_panic(int argc, char **argv) { panic("requested from the monitor"); }
 static void cmd_lspci(int argc, char **argv) { pci_dump(); }
 static void cmd_usb(int argc, char **argv) { xhci_dump(); }
+static void cmd_hwinfo(int argc, char **argv) { hwinfo(); }
+
+static void cmd_dmesg(int argc, char **argv)
+{
+	bool ok = true;
+	long n = argc > 1 ? katol(argv[1], &ok) : 0;
+	if (!ok || n < 0) {
+		kprintf("usage: dmesg [lines]\n");
+		return;
+	}
+	klog_dump_tail((unsigned)MIN(n, 100000L));
+}
 
 static const struct {
 	const char *name;
@@ -107,6 +123,8 @@ static const struct {
 	{ "echo", cmd_echo, "echo words" },
 	{ "lspci", cmd_lspci, "PCI/PCIe functions (ECAM)" },
 	{ "usb", cmd_usb, "xHCI ports and the USB keyboard" },
+	{ "hwinfo", cmd_hwinfo, "PCI and USB IDs on one screen (photograph it)" },
+	{ "dmesg", cmd_dmesg, "dmesg [n]: the kernel log (Page Up/Down scroll)" },
 	{ "bt", cmd_bt, "backtrace of the monitor thread" },
 	{ "panic", cmd_panic, "panic the kernel (test the panic path)" },
 	{ "reboot", cmd_reboot, "reset the machine" },
@@ -147,9 +165,17 @@ int monitor_exec(char *line)
 
 static size_t read_line(char *buf, size_t size)
 {
+	static struct vt_dec vt;
 	size_t n = 0;
 	for (;;) {
-		int c = console_getc_wait();
+		int c = vt_decode(&vt, console_getc_wait());
+		if (c == VT_PGUP || c == VT_PGDN) { /* scroll the screen by a page */
+			int page = fbcon_rows > 1 ? fbcon_rows - 1 : 1;
+			fbcon_scroll(c == VT_PGUP ? page : -page);
+			continue;
+		}
+		if (c < 0)
+			continue;
 		if (c == '\r' || c == '\n') {
 			console_write("\n", 1);
 			buf[n] = '\0';

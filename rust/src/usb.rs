@@ -183,6 +183,15 @@ impl BootKbd {
                 self.caps = !self.caps;
                 continue;
             }
+            if k == 0x4b || k == 0x4e {
+                // Page Up / Page Down: the VT220 sequence, whole or not at all
+                let seq: &[u8; 4] = if k == 0x4b { b"\x1b[5~" } else { b"\x1b[6~" };
+                if let Some(dst) = out.get_mut(n..n + 4) {
+                    dst.copy_from_slice(seq);
+                    n += 4;
+                }
+                continue;
+            }
             if let (Some(c), Some(slot)) = (usage_to_ascii(k, shift, ctrl, self.caps), out.get_mut(n)) {
                 *slot = c;
                 n += 1;
@@ -436,6 +445,17 @@ mod tests {
         let n = kbd.report(&r9, &mut out);
         assert_eq!(n, 0);
         
+        // Page Up / Page Down become the VT220 sequences ESC [5~ / ESC [6~,
+        // all four bytes or none
+        let mut k3 = BootKbd::new();
+        assert_eq!(k3.report(&[0, 0, 0x4b, 0, 0, 0, 0, 0], &mut out), 4);
+        assert_eq!(&out[..4], b"\x1b[5~");
+        assert_eq!(k3.report(&[0, 0, 0x4b, 0x4e, 0, 0, 0, 0], &mut out), 4);
+        assert_eq!(&out[..4], b"\x1b[6~");
+        let mut k4 = BootKbd::new();
+        let mut out3 = [0u8; 3];
+        assert_eq!(k4.report(&[0, 0, 0x04, 0x4e, 0, 0, 0, 0], &mut out3), 1); // 'a' fits, the sequence does not
+        assert_eq!(out3[0], b'a');
         // Keys moving between slots are not new: release 'a', 'b' moves to slot 0
         let mut k2 = BootKbd::new();
         assert_eq!(k2.report(&[0, 0, 0x04, 0x05, 0, 0, 0, 0], &mut out), 2);

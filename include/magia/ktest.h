@@ -49,6 +49,7 @@ void kt_uget(void *dst, uint64_t uva, size_t n);       /* copyin or fail     */
 uint64_t kt_ustr(uint64_t uva, const char *s);         /* copy s incl. NUL   */
 int kt_spawn(const char *name, void (*fn)(void *), void *arg); /* child pid */
 int kt_wait(int pid);                                  /* waitpid -> status  */
+bool kt_log_has(uint64_t from, const char *s); /* t_klog.c: s in the kernel log after `from` */
 
 #define KT_ASSERT(c)                                                         \
 	do {                                                                 \

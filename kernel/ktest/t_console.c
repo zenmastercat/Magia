@@ -56,7 +56,8 @@ KTEST(031, kbd_scancode_translation)
 			if (pre)
 				kbd_translate(&st, 0xe0);
 			int c = kbd_translate(&st, (uint8_t)sc);
-			KT_ASSERT(c >= -1 && c < 256);
+			KT_ASSERT((c >= -1 && c < 256) || c == KBD_PGUP || c == KBD_PGDN);
 		}
-	KT_ASSERT(kbd_present); /* QEMU q35 has an i8042 */
+	/* QEMU q35 has an i8042, except in the desktop-like boot (i8042=off) */
+	KT_EQ(kbd_present, !cmdline_has("kt-desktop"));
 }
